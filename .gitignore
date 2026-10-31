@@ -1,0 +1,5 @@
+# This repo is public. Only what a phone needs goes in it.
+HANDOVER.md
+tests/
+serve.ps1
+*.json.bak

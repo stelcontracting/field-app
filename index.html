@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- The browser refuses every connection except the few optional internet extras named here. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://spatial-img.information.qld.gov.au; connect-src 'self' https://spatial-gis.information.qld.gov.au https://api.met.no; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#262261">
+<meta name="mobile-web-app-capable" content="yes">
+<title>STEL Field</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <span class="mast-mark">STEL</span>
+    <span class="mast-title" id="mastTitle">Field</span>
+    <span class="saved" id="savedFlag" aria-live="polite"></span>
+  </header>
+  <main id="app"><div class="loading">Opening your records…</div></main>
+</div>
+<nav class="tabs" id="tabs" aria-label="Main">
+  <button class="tab" data-tab="home" type="button">Home</button>
+  <button class="tab" data-tab="mix" type="button">Mix</button>
+  <button class="tab" data-tab="clients" type="button">Clients</button>
+  <button class="tab" data-tab="quotes" type="button">Quotes</button>
+  <button class="tab" data-tab="jobs" type="button">Jobs</button>
+</nav>
+<noscript>This app needs JavaScript switched on.</noscript>
+<script src="calc.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

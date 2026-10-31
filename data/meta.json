@@ -1,0 +1,15 @@
+{
+  "v": 2,
+  "built": "2026-09-05",
+  "source": "APVMA PubCRIS open dataset (data.gov.au), CC BY 3.0 AU",
+  "counts": {
+    "products": 7781,
+    "targets": 3831,
+    "weeds": 2008,
+    "insects": 957,
+    "diseases": 752,
+    "hosts": 5224,
+    "index": 877804,
+    "detail": 2227150
+  }
+}
