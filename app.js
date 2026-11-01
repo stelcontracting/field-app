@@ -2310,13 +2310,24 @@ function calcMix(m){
 /* ═════════════ MIX ═════════════ */
 var MIX = null;
 function blankMixState(){
-  /* area and spray start on the units the price list uses, and the tank on the 450 L
+  /* area is always hectares and spray always L/ha, and the tank starts on the 450 L
      mixing tank. A product's unit starts empty: it comes off the label every time. */
   return {id: "mix", area: "", areaUnit: "ha", sprayMode: "rate", waterRate: "", sprayRateUnit: "L/ha", sprayTotal: "", tank: "450",
     droneId: "", paddockId: "", items: [], jobLabel: "", jobId: "", recipeId: "", mixed: 0, mixedSig: ""};
 }
+/* A mix kept from when this screen also took acres, m² or L/1000 m² comes across as the same
+   area and rate in hectares and L/ha, so it can't be reread as hectares and its sums don't move. */
+function hectaresOnly(m){
+  var a = C.parse(m.area), au = C.AREA_UNITS[m.areaUnit];
+  if(m.areaUnit !== "ha" && a && au) m.area = C.unrounded(C.mul(a, au.toHa), 40);
+  m.areaUnit = "ha";
+  var key = C.unitKey(m.sprayRateUnit), v = C.parse(m.waterRate), su = C.SPRAY_RATE_UNITS[key];
+  if(key !== "L/ha" && v && su) m.waterRate = C.unrounded(C.mul(v, su.toLha), 40);
+  m.sprayRateUnit = "L/ha";
+}
 function mixState(){
   if(!MIX) MIX = Object.assign(blankMixState(), byId("settings", "mix") || {});
+  hectaresOnly(MIX);
   return MIX;
 }
 function mixInput(m){
@@ -2370,6 +2381,7 @@ function openMixFor(j){
     if(j.mixTank) m.tank = j.mixTank;
     m.mixed = j.mixed || 0;
     m.mixedSig = j.mixedSig || "";
+    hectaresOnly(m);
   }
   /* a saved mix picked on the job since its last mix, or a first go with one */
   if(rec && (j.recipeId !== (j.mixRecipeId || "") || !m.items.length)){
@@ -2498,9 +2510,9 @@ function mixView(){
   }
   var sp = byId("paddocks", m.paddockId), sd = byId("drones", m.droneId), sj = byId("jobs", m.jobId);
   if(sp && String(sp.ha || "") !== String(m.area || "")){
-    staleNote(sp.name + " is now " + (sp.ha ? sp.ha + " ha" : "blank") + ", and this mix uses " + (m.area || "nothing") + ".", "Use the paddock's area", function(){ m.area = sp.ha || ""; m.areaUnit = "ha"; });
-  } else if(sj && !m.paddockId && jobHa(sj) && (m.areaUnit !== "ha" || roundHa(jobHa(sj)) !== String(m.area || ""))){
-    staleNote("This job's paddocks now come to " + roundHa(jobHa(sj)) + " ha, and this mix uses " + (m.area || "nothing") + " " + C.AREA_UNITS[m.areaUnit].label + ".", "Use the job's area", function(){ m.area = roundHa(jobHa(sj)); m.areaUnit = "ha"; });
+    staleNote(sp.name + " is now " + (sp.ha ? sp.ha + " ha" : "blank") + ", and this mix uses " + (m.area || "nothing") + ".", "Use the paddock's area", function(){ m.area = sp.ha || ""; });
+  } else if(sj && !m.paddockId && jobHa(sj) && roundHa(jobHa(sj)) !== String(m.area || "")){
+    staleNote("This job's paddocks now come to " + roundHa(jobHa(sj)) + " ha, and this mix uses " + (m.area ? m.area + " ha" : "nothing") + ".", "Use the job's area", function(){ m.area = roundHa(jobHa(sj)); });
   }
   if(sd && String(sd.tank || "") !== String(m.tank || "")){
     staleNote(sd.name + "'s tank is now " + (sd.tank ? sd.tank + " L" : "blank") + ", and this mix uses " + (m.tank || "nothing") + ".", "Use the drone's tank", function(){ m.tank = sd.tank || ""; });
@@ -2508,8 +2520,7 @@ function mixView(){
   var results, warns, saveBtn, jobBtn;
   function refresh(){
     var res = C.mixMany(mixInput(m));
-    document.getElementById("eArea").textContent = res.echo.area;
-    document.getElementById("eSpray").textContent = res.echo.spray;
+    document.getElementById("eSpray").textContent = m.sprayMode === "total" ? res.echo.spray : "";
     results.innerHTML = mixResultHtml(res, m);
     mixSave();
     warns.textContent = "";
@@ -2525,7 +2536,7 @@ function mixView(){
       return [p.id, (clientName(p.clientId) ? clientName(p.clientId) + ", " : "") + p.name + (p.ha ? " (" + fmtN(num(p.ha), 2) + " ha)" : "")];
     })), {on: function(v){
       var p = byId("paddocks", v);
-      if(p){ m.area = p.ha || ""; m.areaUnit = "ha"; }
+      if(p) m.area = p.ha || "";
       rerender();
     }});
     fld(form, "Paddock", padSel);
@@ -2535,9 +2546,7 @@ function mixView(){
     if(padSel) padSel.value = "";
     refresh();
   }});
-  fld(form, "Area to treat", haBox);
-  unitPick(form, "Area unit", m, "areaUnit", [["ha","ha"],["ac","acres"],["m2","m²"]], function(){ m.paddockId = ""; mixSave(); rerender(); });
-  add(form, "p", "echo").id = "eArea";
+  fld(form, "Area to treat, ha", haBox);
 
   if(m.sprayMode === "total"){
     fld(form, "Total spray volume, L", input(m, "sprayTotal", {num: true, on: refresh}));
@@ -2545,9 +2554,8 @@ function mixView(){
     toRate.type = "button";
     toRate.addEventListener("click", function(){ m.sprayMode = "rate"; mixSave(); rerender(); });
   } else {
-    fld(form, "Spray rate", input(m, "waterRate", {num: true, on: refresh}));
-    unitPick(form, "Spray rate unit", m, "sprayRateUnit", [["L/ha","L/ha"],["L/1000m2","L/1000 m²"]], function(){ mixSave(); rerender(); });
-    var toTotal = add(form, "button", "linkbtn", "Use a total spray volume instead");
+    fld(form, "Spray rate, L/ha", input(m, "waterRate", {num: true, on: refresh}));
+    var toTotal =add(form, "button", "linkbtn", "Use a total spray volume instead");
     toTotal.type = "button";
     toTotal.addEventListener("click", function(){ m.sprayMode = "total"; mixSave(); rerender(); });
   }
