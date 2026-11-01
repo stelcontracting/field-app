@@ -4,6 +4,8 @@ Clients, quotes, jobs, tank mixes and spray records on one phone, with or withou
 
 It never suggests an application rate. Every rate is typed off the current product label, and the app only does the maths.
 
+The price list in `rates.js` is public, the same as in the STEL Quote Builder, and the owner's own rates are kept on the phone.
+
 ## Data and credits
 
 - Products: APVMA PubCRIS open dataset, CC BY 3.0 AU. Names, makers and actives only.

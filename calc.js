@@ -366,12 +366,240 @@
     return { lines: out, bad: anyBad, gstBad: gstBad, subtotal: subtotal, gst: gst, total: subtotal + gst };
   }
 
+  /* ---------- pricing a job off the price list ---------- */
+
+  /* The Quote Builder's appCalc, calc and flagsFor, rule for rule, in exact fractions.
+     No prices live here: they all come in on the card. Every line carries the qty and
+     rate that multiply to its amount, so quoteTotals can add it up from one source.
+     b: {apps:[{svc,area,rateKey,chargeBy,price,label,hours,hourly,spot,product}],km,locations,washdowns,hazards:[keys]}
+     card: the rate card. P: self.StelRates, for the names and wording. */
+  function decimal(a) { return unrounded(a, 40); }
+  function commas(s) { var p = s.split("."); p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ","); return p.join("."); }
+  function plainText(a) { return commas(rounded(a, 2).text); }
+  function moneyOf(a) { return money(toCents(a)); }
+  function isOne(a) { return a.n === 1n && a.d === 1n; }
+  /* a count: the nearest whole number, and never below nothing, as the Quote Builder does */
+  function wholeCount(v) { return Math.max(0, Math.round(parseFloat(v) || 0)); }
+
+  function priceJob(b, card, P) {
+    var ZERO = R(0), bad = [];
+    function read(v, what) {
+      var s = String(v === null || v === undefined ? "" : v).trim();
+      if (s === "") return ZERO;
+      var r = parse(s);
+      if (!r) { if (bad.indexOf(what) < 0) bad.push(what); return ZERO; }
+      return r;
+    }
+    var LIST = "A figure on your price list", c = {};
+    ["hourly", "setup", "washFee", "localKm", "travelSpray", "travelMap", "minLocalHrs", "minAwayHrs", "minMapping", "spreadCut", "mapCut"].forEach(function (k) { c[k] = read(card[k], LIST); });
+
+    var hazKeys = Object.keys(P.HAZARDS);
+    var hz = hazKeys.filter(function (k) { return (b.hazards || []).indexOf(k) >= 0; });
+    function hazardText(l) {
+      if (!l.length) return "";
+      var t = l.map(function (k) { return P.HAZARDS[k].say; });
+      return t.length === 1 ? t[0] : t.slice(0, -1).join(", ") + " and " + t[t.length - 1];
+    }
+    var count = b.apps.length;
+
+    /* one application's charge */
+    function priceApp(src, i) {
+      var svc = P.META[src.svc] ? src.svc : "spray", M = P.META[svc];
+      var area = read(src.area, "Hectares"), hrs = read(src.hours, "Hours on site");
+      var rv = src.rateKey || "i0";
+      var opt = rv.charAt(0) === "i" ? card[svc][parseInt(rv.slice(1), 10)] : null;
+      var lp = opt ? read(opt.r, LIST) : ZERO;
+      var price = read(src.price, "Price per hectare");
+      var custom = rv === "other" || cmp(price, lp) !== 0;
+      var label = rv === "other" ? (String(src.label || "").trim() || "Agreed rate")
+        : opt ? opt.t
+        : (M.extra && rv === M.extra.v) ? M.extra.label : "";
+      var byHour = src.chargeBy === "hour";
+      var typedHourly = read(src.hourly, "Hourly rate");
+      var jobHourly = isZero(typedHourly) ? c.hourly : typedHourly;
+      var product = String(src.product || "").trim();
+      var a = {
+        i: i, svc: svc, name: M.name, crm: M.crm, area: area, hrs: hrs, rv: rv, label: label,
+        custom: custom, price: price, listP: lp, product: product, byHour: byHour, jobHourly: jobHourly,
+        hourly: false, hourlyWhy: "", poa: false, reasons: [], work: ZERO, line: null
+      };
+      var tag = count > 1 ? "Application " + i + ": " : "";
+
+      if (svc === "spray") {
+        if (src.spot) { a.poa = true; a.reasons.push(tag + "Spot spraying is P.O.A. on the price list."); }
+        if (rv === "poa") { a.poa = true; a.reasons.push(tag + M.extra.why); }
+        if (hz.length) { a.poa = true; a.reasons.push(tag + "High risk site (" + hazardText(hz) + "). Spray work over hazards is P.O.A."); }
+      }
+      if (svc === "spread") {
+        if (hz.length >= 2) { a.poa = true; a.reasons.push(tag + "Multiple hazards (" + hazardText(hz) + "). Spreading with multiple hazards is P.O.A."); }
+        if (rv === "over") { a.hourly = true; a.hourlyWhy = M.extra.label + " is charged at $" + decimal(c.hourly) + "/hr."; }
+        else if (!custom && !isZero(area) && cmp(area, c.spreadCut) < 0) { a.hourly = true; a.hourlyWhy = "Under " + decimal(c.spreadCut) + " ha is charged at $" + decimal(c.hourly) + "/hr."; }
+      }
+      if (svc === "map") {
+        if (!custom && !isZero(area) && cmp(area, c.mapCut) < 0) { a.hourly = true; a.hourlyWhy = "Under " + decimal(c.mapCut) + " ha is charged at $" + decimal(c.hourly) + "/hr, processing included."; }
+      }
+      if (byHour) { a.hourly = true; a.hourlyWhy = "You have set this one to charge by the hour."; }
+
+      if (isZero(area) && !byHour && !a.poa) { a.poa = true; a.onlyArea = true; a.reasons.push(tag + "Put a hectare figure in and the price will work itself out."); }
+
+      if (byHour && !isZero(hrs)) { a.poa = false; a.reasons = []; }
+      else if (custom && !isZero(price) && !isZero(area)) { a.poa = false; a.reasons = []; a.hourly = false; }
+      if (a.poa) return a;
+
+      if (a.hourly && isZero(hrs)) { a.poa = true; a.needHours = true; a.reasons.push(tag + "No hours set yet."); return a; }
+      if (!a.hourly && isZero(price)) { a.poa = true; a.reasons.push(tag + "No price per hectare set."); return a; }
+
+      if (a.hourly) {
+        a.work = mul(hrs, jobHourly);
+        a.line = {
+          d: a.name + (!isZero(area) ? ", " + plainText(area) + " ha" : ""),
+          c: (label ? label + ". " : "") + (product ? product + ". " : "") + "Charged by the hour",
+          q: plainText(hrs) + (isOne(hrs) ? " hr" : " hrs"), u: jobHourly, a: a.work,
+          qty: decimal(hrs), unit: isOne(hrs) ? "hr" : "hrs", rate: decimal(jobHourly)
+        };
+      } else {
+        a.work = mul(area, price);
+        a.line = {
+          d: a.name + ", " + plainText(area) + " ha",
+          c: (label ? label + ". " : "") + product,
+          q: plainText(area) + " ha", u: price, a: a.work,
+          qty: decimal(area), unit: "ha", rate: decimal(price)
+        };
+      }
+      return a;
+    }
+
+    /* the whole job */
+    var km = read(b.km, "Distance from base");
+    read(b.locations, "Operating locations");
+    read(b.washdowns, "Wash downs");
+    var locs = wholeCount(b.locations), washes = wholeCount(b.washdowns);
+    var local = cmp(km, c.localKm) <= 0;
+    var apps = b.apps.map(function (src, k) { return priceApp(src, k + 1); });
+
+    var res = {
+      apps: apps, km: km, locs: locs, local: local, hz: hz, hzText: hazardText(hz), washes: washes, wash: ZERO,
+      area: apps.reduce(function (s, a) { return add(s, a.area); }, ZERO),
+      lines: [], poa: false, reasons: [], bad: bad, flags: [],
+      work: ZERO, minApplied: false, minCharge: ZERO,
+      travel: ZERO, travelKm: ZERO, travelRate: ZERO, setup: ZERO, sub: ZERO,
+      setupEach: c.setup, washEach: c.washFee, localKm: c.localKm, minAwayHrs: c.minAwayHrs,
+      anyAir: apps.some(function (a) { return a.svc !== "map"; })
+    };
+    res.travelRate = res.anyAir ? c.travelSpray : c.travelMap;
+
+    /* a number nobody can read stops the price rather than guessing at it */
+    if (bad.length) {
+      res.poa = true;
+      res.reasons = bad.map(function (w) { return w + " can't be read. Numbers only, like 12.5."; });
+      return res;
+    }
+
+    var unpriced = apps.filter(function (a) { return a.poa; });
+    if (unpriced.length) {
+      res.poa = true;
+      unpriced.forEach(function (a) { a.reasons.forEach(function (x) { res.reasons.push(x); }); });
+      return res;
+    }
+
+    apps.forEach(function (a) { res.work = add(res.work, a.work); res.lines.push(a.line); });
+
+    /* minimum applies to the job, not to each application */
+    var allMap = apps.every(function (a) { return a.svc === "map"; });
+    var minLabel;
+    if (allMap) {
+      res.minCharge = c.minMapping;
+      minLabel = moneyOf(c.minMapping) + " mapping minimum";
+    } else {
+      var mh = local ? c.minLocalHrs : c.minAwayHrs;
+      res.minCharge = mul(mh, apps[0].jobHourly);
+      minLabel = plainText(mh) + " hour minimum";
+    }
+    if (cmp(res.work, res.minCharge) < 0) {
+      res.minApplied = true;
+      var short = sub(res.minCharge, res.work);
+      if (apps.length === 1) {
+        var only = res.lines[0];
+        only.c = (only.c ? only.c + ". " : "") + "Lifted to the " + minLabel;
+        only.a = res.minCharge;
+        only.q = ""; only.u = null;
+        only.qty = "1"; only.unit = "job"; only.rate = decimal(res.minCharge);
+      } else {
+        res.lines.push({
+          d: "Minimum charge",
+          c: "The job together comes under the " + minLabel + " of " + moneyOf(res.minCharge),
+          q: "", u: null, a: short, qty: "1", unit: "job", rate: decimal(short)
+        });
+      }
+      res.work = res.minCharge;
+    }
+
+    if (locs > 0) {
+      res.setup = mul(R(locs), c.setup);
+      res.lines.push({
+        d: "Set up, clean up and pack up",
+        c: locs === 1 ? "One operating location" : locs + " operating locations",
+        q: String(locs), u: c.setup, a: res.setup, qty: String(locs), unit: locs === 1 ? "location" : "locations", rate: decimal(c.setup)
+      });
+    }
+
+    if (washes > 0) {
+      res.wash = mul(R(washes), c.washFee);
+      res.lines.push({
+        d: "Chemical and seed wash down",
+        c: "Between jobs and properties",
+        q: String(washes), u: c.washFee, a: res.wash, qty: String(washes), unit: washes === 1 ? "wash down" : "wash downs", rate: decimal(c.washFee)
+      });
+    }
+
+    if (!local) {
+      /* the ute is loaded for the heaviest job on the run */
+      res.travelKm = mul(km, R(2));
+      res.travel = mul(res.travelKm, res.travelRate);
+      res.lines.push({
+        d: "Travel",
+        c: plainText(km) + " km each way, return",
+        q: plainText(res.travelKm) + " km", u: res.travelRate, a: res.travel,
+        qty: decimal(res.travelKm), unit: "km", rate: decimal(res.travelRate)
+      });
+    }
+
+    res.sub = add(add(add(res.work, res.setup), res.wash), res.travel);
+    res.flags = jobFlags(res, c, P, allMap);
+    return res;
+  }
+
+  /* the Quote Builder's flagsFor */
+  function jobFlags(r, c, P, allMap) {
+    var out = [], many = r.apps.length > 1;
+    if (r.minApplied) out.push({ tag: "Minimum", txt: allMap
+      ? "Job came in under the mapping minimum, so it is charged at " + moneyOf(r.minCharge) + "."
+      : "Job came in under the " + (r.local ? "local" : "out of range") + " minimum of " + moneyOf(r.minCharge) + ", so it is charged at the minimum." });
+
+    r.apps.forEach(function (a) {
+      var tag = many ? "App " + a.i : "Your price";
+      if (a.custom && !a.hourly) out.push({ tag: tag, warn: true,
+        txt: (many ? a.name + ". " : "") + "Your own price. " + plainText(a.area) + " ha x $" + plainText(a.price) + " = " + moneyOf(mul(a.area, a.price)) + "." });
+      if (a.hourly && a.hourlyWhy) out.push({ tag: many ? "App " + a.i : "Hourly", txt: a.hourlyWhy });
+      if (a.hourly && cmp(a.jobHourly, c.hourly) !== 0) out.push({ tag: many ? "App " + a.i : "Your rate", warn: true,
+        txt: "Charging $" + plainText(a.jobHourly) + "/hr instead of your usual $" + plainText(c.hourly) + "/hr. " +
+          plainText(a.hrs) + " hrs x $" + plainText(a.jobHourly) + " = " + moneyOf(mul(a.hrs, a.jobHourly)) + "." });
+    });
+
+    if (r.local && !isZero(r.km)) out.push({ tag: "Travel", txt: "Inside " + decimal(c.localKm) + " km of " + P.WORDING.base + ", so no travel charge." });
+    if (!r.local && cmp(r.km, R(P.FAR_KM)) >= 0) out.push({ tag: "Distance", warn: true, txt: "That is " + plainText(r.km) + " km out. " + P.FAR_TEXT + " Travel alone is " + moneyOf(r.travel) + ". Worth lining up a second job on the same trip." });
+    if (r.hz.length && !r.apps.some(function (a) { return a.svc === "spray"; })) out.push({ tag: "Hazards", warn: true, txt: "Noted on site: " + r.hzText + ". Get it in writing that the client disclosed these before the job." });
+    if (many) out.push({ tag: "Two jobs", txt: r.apps.length + " applications on the one trip. Set up and travel are charged once, not once each." });
+    return out;
+  }
+
   var api = {
     R: R, add: add, sub: sub, mul: mul, div: div, cmp: cmp, parse: parse, parseSigned: parseSigned,
     rounded: rounded, unrounded: unrounded, show: show,
     AREA_UNITS: AREA_UNITS, SPRAY_RATE_UNITS: SPRAY_RATE_UNITS, PRODUCT_UNITS: PRODUCT_UNITS,
     echoProduct: echoProduct, echoArea: echoArea, echoSprayRate: echoSprayRate,
-    mix: mix, mixMany: mixMany, unitKey: unitKey, toCents: toCents, money: money, quoteTotals: quoteTotals
+    mix: mix, mixMany: mixMany, unitKey: unitKey, toCents: toCents, money: money, quoteTotals: quoteTotals,
+    priceJob: priceJob, plainText: plainText, moneyOf: moneyOf, decimal: decimal, commas: commas, isZero: isZero
   };
   root.StelCalc = api;
 })(typeof self !== "undefined" ? self : this);

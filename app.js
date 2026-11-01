@@ -66,6 +66,11 @@ function num(v){
   if(!/\d/.test(s) || !/^-?(\d{1,3}(,\d{3})+|\d+)?(\.\d*)?$/.test(s)) return NaN;
   return parseFloat(s.replace(/,/g, ""));
 }
+/* the exact sums take plain decimals only, so "1,200" can't be read there even though it's a number */
+function unreadable(v, signed){
+  var s = String(v == null ? "" : v).trim();
+  return s !== "" && !(signed ? C.parseSigned(s) : C.parse(s));
+}
 function ls(k, d){ try { var v = localStorage.getItem(k); return v == null ? d : v; } catch(e){ return d; } }
 function lsSet(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
 function lsJson(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } }
@@ -438,7 +443,12 @@ function input(obj, key, o){
   if(o.ph) n.placeholder = o.ph;
   n.dataset.f = key;
   n.value = obj[key] == null ? "" : obj[key];
-  function mark(){ if(o.num) n.classList.toggle("bad", n.value.trim() !== "" && isNaN(num(n.value))); }
+  /* strict is for figures the exact sums read, so the red box means what "can't be read" means */
+  function mark(){
+    if(!o.num) return;
+    var s = n.value.trim();
+    n.classList.toggle("bad", o.strict ? (s === "" ? !!o.need : unreadable(s, o.signed)) : s !== "" && isNaN(num(s)));
+  }
   mark();
   n.addEventListener("input", function(){ obj[key] = n.value; mark(); if(o.on) o.on(n.value); });
   return n;
@@ -2930,12 +2940,151 @@ function peopleGaps(rec){ return !(rec.owner.name && rec.owner.address && rec.ow
 
 /* ═════════════ QUOTES ═════════════ */
 var QUOTE_STATUS = ["Draft","Quoted","Follow up","Won","Lost","No response"];
+/* the price list and the quote wording: they start in rates.js and then live in settings */
+var PRICES = self.StelRates;
+var LEAD_SOURCES = ["Word of mouth","Facebook","Google Ads","Referral","Noticeboard","Field day","Repeat customer"];
+var MAX_APPS = 4;
+/* GST from the owner's price list and quotes. Editable. */
+function freshQuoteCfg(){ return {gstOn: true, gstRate: "10", prefix: "Q-", footer: ""}; }
 function quoteCfg(){
   var c = cfg();
-  /* GST from the owner's price list and quotes. Editable, and nothing else is preset. */
-  c.quote = c.quote || {gstOn: true, gstRate: "10", prefix: "Q-", footer: ""};
+  c.quote = c.quote || freshQuoteCfg();
+  /* First use: the wording the Quote Builder already publishes, then it's the owner's to change
+     under Backup and setup. The footer is left alone: it's what a typed quote prints, as it always did. */
+  if(!c.quote.words){
+    c.quote.words = clone(PRICES.WORDING);
+    saveCfg().catch(function(){});
+  }
   return c.quote;
 }
+/* Your business is the one place for these five, read fresh each time a priced quote prints.
+   A box left blank there falls back to the rate card's wording. */
+function quoteBusiness(){
+  var typed = cfg().business || {}, out = clone(quoteCfg().words.business || {}), list = PRICES.WORDING.business;
+  ["name","abn","address","phone","email"].forEach(function(k){
+    out[k] = String(typed[k] || "").trim() ? typed[k] : list[k];
+  });
+  return out;
+}
+/* The rate card lives in settings, so it goes in the backup. On first use it starts from what
+   the owner edited in the Quote Builder on this same web address, if anything. That copy is
+   only read: the Quote Builder keeps its own. */
+function rateCard(){
+  var c = cfg();
+  if(!c.rates){
+    var card = clone(PRICES.DEFAULTS), kept = null;
+    try { kept = JSON.parse(ls("stel-rates-v1", "null")); } catch(e){ kept = null; }
+    if(kept && typeof kept === "object"){
+      Object.keys(kept).forEach(function(k){
+        if(k in card && Array.isArray(card[k]) === Array.isArray(kept[k])) card[k] = kept[k];
+      });
+      c.ratesFrom = "builder";
+      if(typeof kept.gst === "number") quoteCfg().gstRate = String(kept.gst);
+    }
+    c.rates = card;
+    saveCfg().catch(function(){});
+  }
+  return c.rates;
+}
+function listPriceOf(card, a){
+  if(a.rateKey && a.rateKey.charAt(0) === "i"){
+    var o = card[a.svc][parseInt(a.rateKey.slice(1), 10)];
+    return o ? String(o.r) : "0";
+  }
+  return "0";
+}
+function newApp(card){
+  var a = {svc: "spray", area: "", rateKey: "i0", chargeBy: "ha", price: "", label: "", hours: "", hourly: String(card.hourly), spot: false, product: ""};
+  a.price = listPriceOf(card, a);
+  return a;
+}
+function pickService(a, card, v){
+  a.svc = v;
+  a.rateKey = "i0";
+  a.price = listPriceOf(card, a);
+  if(v !== "spray") a.spot = false;
+}
+/* "Something else" is your own line, so what you typed stays. P.O.A. and over the top go to nothing on purpose. */
+function pickRate(a, card, v){
+  a.rateKey = v;
+  if(v !== "other") a.price = listPriceOf(card, a);
+}
+function newJob(){
+  var card = clone(rateCard());
+  return {card: card, apps: [newApp(card)], km: "", locations: "", washdowns: "", hazards: [], deposit: "", validDays: "30", followDays: "7", ref: "", leadSource: LEAD_SOURCES[0]};
+}
+function rateOptions(card, svc){
+  var M = PRICES.META[svc];
+  var o = card[svc].map(function(x, k){ return ["i" + k, x.t]; });
+  if(M.extra) o.push([M.extra.v, M.extra.t]);
+  o.push(["other", "Something else"]);
+  return o;
+}
+function priceOf(q){ return C.priceJob(q.job, q.job.card, PRICES); }
+/* The builder's answer goes into q.lines, marked auto, ahead of anything typed. The sheet, the
+   CSV and the totals then all read one source, so what prints always adds up to the cent. */
+function writePriced(q){
+  var r = priceOf(q), typed = q.lines.filter(function(l){ return !l.auto; });
+  var priced = r.poa ? [] : r.lines.map(function(l, i){ return {id: "auto" + i, auto: true, desc: l.d, note: l.c, qty: l.qty, unit: l.unit, rate: l.rate}; });
+  q.poa = r.poa;
+  q.lines = priced.concat(typed);
+  return r;
+}
+function sameFigure(x, y){
+  var a = C.parse(x), b = C.parse(y);
+  return !!a && !!b && C.cmp(a, b) === 0;
+}
+/* two rate cards or sets of wording, where 50 typed in a box is a string and 50 off the list isn't */
+function sameData(a, b){
+  function s(x){ return JSON.stringify(x, function(k, v){ return typeof v === "number" ? String(v) : v; }); }
+  return s(a) === s(b);
+}
+/* A quote keeps the card it was priced on, so changing a rate never changes a quote that went
+   out. A draft, or a copy, moves to today's card: list prices follow it, own prices stay. */
+function jobUseCurrentCard(q){
+  var j = q.job, old = j.card, cur = rateCard();
+  if(JSON.stringify(old) === JSON.stringify(cur)) return false;
+  j.apps.forEach(function(a){
+    if(a.rateKey !== "other" && sameFigure(a.price, listPriceOf(old, a))) a.price = listPriceOf(cur, a);
+    if(sameFigure(a.hourly, old.hourly)) a.hourly = String(cur.hourly);
+  });
+  j.card = clone(cur);
+  writePriced(q);
+  return true;
+}
+function refreshDraftCard(q){
+  /* a draft held by a merge stays put until the owner says to move it */
+  if(q.job && q.status === "Draft" && !q.ratesHeld && jobUseCurrentCard(q) && byId("quotes", q.id)) put("quotes", q).catch(function(){});
+}
+/* Only ever into an empty box on a draft. A figure someone typed, or a quote that has gone out, stays. */
+function fillSiteHa(q, p){
+  var first = q.job && q.job.apps[0];
+  if(!first || q.status !== "Draft" || !p || !p.ha || String(first.area || "").trim()) return;
+  var ha = C.parse(String(p.ha));
+  if(!ha) return;
+  first.area = C.rounded(ha, 2).text;
+  first.fromSite = p.id;
+  writePriced(q);
+}
+/* what the hint under Hectares says: never that a figure came from the site unless it did */
+function siteHint(q, a){
+  var site = byId("paddocks", q.paddockId);
+  if(!site) return "";
+  if(a.fromSite === site.id) return "Filled in from the site. Check it.";
+  var ha = C.parse(String(site.ha || "")), typed = String(a.area || "").trim();
+  if(!ha || !typed || q.status !== "Draft") return "";
+  var onFile = C.rounded(ha, 2).text;
+  return sameFigure(typed, onFile) ? "" : "The site's record says " + onFile + " ha. Hectares stays as it is unless you change it.";
+}
+function depositOf(q){ return Math.min(100, Math.max(0, parseFloat(q.job.deposit) || 0)); }
+function depositCents(q, t){
+  return C.toCents(C.mul(C.R(t.total, 100n), C.div(C.parse(String(depositOf(q))) || C.R(0), C.R(100))));
+}
+/* a quote with its date cleared out still prints a real one */
+function quoteDate(q){ return /^\d{4}-\d\d-\d\d/.test(q.date || "") ? q.date : todayISO(); }
+function longDate(iso){ var p = parts(iso); return new Date(p[0], p[1], p[2]).toLocaleDateString("en-AU", {day: "numeric", month: "long", year: "numeric"}); }
+function shortDate(iso){ var p = parts(iso); return p[2] + " " + ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][p[1]] + " " + p[0]; }
+function slashDate(iso){ var p = parts(iso); return pad(p[2]) + "/" + pad(p[1] + 1) + "/" + p[0]; }
 function nextQuoteNumber(){
   var max = 0;
   S.quotes.forEach(function(q){
@@ -2948,9 +3097,11 @@ function nextQuoteNumber(){
 }
 function blankLine(){ return {id: uid(), desc: "", qty: "", unit: "", rate: ""}; }
 function newQuoteItem(client){
+  rateCard();
   var qc = quoteCfg();
   var q = {id: uid(), number: nextQuoteNumber(), date: todayISO(), status: "Draft", clientId: "", clientName: "", contact: "", email: "", phone: "",
-    paddockId: "", location: "", lines: [blankLine()], gstOn: !!qc.gstOn, gstRate: qc.gstRate, notes: ""};
+    paddockId: "", location: "", lines: [], job: newJob(), gstOn: !!qc.gstOn, gstRate: qc.gstRate, notes: ""};
+  writePriced(q);
   if(client) quoteClient(q, client);
   return q;
 }
@@ -2960,6 +3111,12 @@ function quoteClient(q, c){
   q.contact = c ? (c.contact || "") : "";
   q.email = c ? (c.email || "") : "";
   q.phone = c ? (c.phone || "") : "";
+  /* a quote that has gone out keeps where it was for. It only lets go of another client's site */
+  if(q.status !== "Draft"){
+    var was = byId("paddocks", q.paddockId);
+    if(was && (!c || was.clientId !== c.id)) q.paddockId = "";
+    return;
+  }
   q.paddockId = "";
   q.location = "";
   var pads = c ? S.paddocks.filter(function(p){ return p.clientId === c.id; }) : [];
@@ -2972,7 +3129,8 @@ function refreshDraftClient(q){
 }
 function quoteSite(q, p){
   q.paddockId = p ? p.id : "";
-  if(p) q.location = [p.name, p.address || p.locality].filter(Boolean).join(", ");
+  if(p && (q.status === "Draft" || !String(q.location || "").trim())) q.location = [p.name, p.address || p.locality].filter(Boolean).join(", ");
+  fillSiteHa(q, p);
 }
 function plain(cents){ return C.money(cents).replace(/[$,]/g, ""); }
 function rateText(s){
@@ -3015,19 +3173,244 @@ function quotesView(){
       var t = C.quoteTotals(x.lines, x.gstOn, x.gstRate);
       rowItem(list, x.number + " " + (x.clientName || "No client yet"), [
         {t: x.status, k: x.status === "Won" ? "good" : x.status === "Draft" ? "warn" : ""},
-        fmtDate(x.date), C.money(t.total)
+        fmtDate(x.date), x.job && x.poa ? "P.O.A." : C.money(t.total)
       ], function(){ quoteSheet(x); });
     });
   }
   draw();
 }
+/* The priced part of the form: one card per application, then travel, then the price. Returns
+   the function that repaints the price and what shows on the cards without touching the fields. */
+function jobForm(sec, q, save){
+  var j = q.job, card = j.card, uis = [];
+  var usual = C.parse(String(card.hourly)) || C.R(0);
+  function changed(){ writePriced(q); save(); paint(); }
+  function hintOf(w){ return w.querySelector(".f-h"); }
+
+  add(sec, "h2", "sec", "The job");
+  j.apps.forEach(function(a, i){
+    var box = add(sec, "div", "prod"), M = PRICES.META[a.svc], u = {};
+    if(j.apps.length > 1) add(box, "h3", "q-app", "Application " + (i + 1));
+    chipRow(box, Object.keys(PRICES.META).map(function(s){ return [s, PRICES.META[s].chip]; }), a.svc, function(v){
+      if(v === a.svc) return;
+      pickService(a, card, v);
+      changed();
+      rerender();
+    });
+    var rs = card[a.svc].map(function(o){ return Number(o.r) || 0; });
+    if(rs.length) add(box, "p", "hint", M.name + " runs " + C.money(BigInt(Math.round(Math.min.apply(null, rs) * 100))) + " to " + C.money(BigInt(Math.round(Math.max.apply(null, rs) * 100))) + " a hectare.");
+    u.area = fld(box, "Hectares", input(a, "area", {num: true, strict: true, on: function(){ delete a.fromSite; changed(); }}), " ");
+    fld(box, M.rateLabel, select(a, "rateKey", rateOptions(card, a.svc), {on: function(v){
+      pickRate(a, card, v);
+      changed();
+      rerender();
+    }}));
+    u.label = fld(box, "Call it what on the quote", input(a, "label", {ph: PRICES.LABEL_HINT, on: changed}));
+    u.price = fld(box, "Price per hectare, $", input(a, "price", {num: true, strict: true, on: changed}), " ");
+    u.hoursRow = add(box, "div", "two");
+    fld(u.hoursRow, "Hours on site", input(a, "hours", {num: true, strict: true, on: changed}));
+    u.hourly = fld(u.hoursRow, "Hourly rate, $", input(a, "hourly", {num: true, strict: true, on: changed}));
+    u.why = add(box, "p", "hint");
+    u.more = fold(box, "By the hour, product, spot spraying", a.chargeBy === "hour" || !!a.product || !!a.spot);
+    var mf = add(add(u.more, "div", "panel"), "div", "form");
+    fld(mf, "Charge by", select(a, "chargeBy", [["ha","The hectare"],["hour","The hour"]], {on: changed}));
+    fld(mf, "Chemical or product", input(a, "product", {ph: "Leave blank: client supplies", on: changed}));
+    if(a.svc === "spray") checkbox(mf, a, "spot", "Spot spraying, not broadacre", changed);
+    if(j.apps.length > 1) btn(box, "Remove this one", "danger small", function(){
+      if(!confirm("Remove this application?")) return;
+      j.apps.splice(j.apps.indexOf(a), 1);
+      writePriced(q);
+      save();
+      rerender();
+    });
+    uis.push(u);
+  });
+  if(j.apps.length < MAX_APPS) btn(sec, "+ Another application", "ghost", function(){ j.apps.push(newApp(card)); writePriced(q); save(); rerender(); });
+
+  add(sec, "h2", "sec", "Site and travel");
+  var tf = panelForm(sec);
+  var kmF = fld(tf, "Distance from base, one way, km", input(j, "km", {num: true, strict: true, on: changed}), " ");
+  var locF = fld(tf, "Operating locations", input(j, "locations", {num: true, strict: true, on: changed}), " ");
+  var hz = {};
+  (j.hazards || []).forEach(function(k){ hz[k] = true; });
+  var extra = foldForm(sec, "Wash downs and hazards", !!(j.hazards || []).length || !!String(j.washdowns || "").trim());
+  var washF = fld(extra, "Chemical and seed wash downs", input(j, "washdowns", {num: true, strict: true, on: changed}), " ");
+  add(extra, "span", "f-l", "Hazards and complexity");
+  Object.keys(PRICES.HAZARDS).forEach(function(k){
+    checkbox(extra, hz, k, PRICES.HAZARDS[k].tick, function(){
+      j.hazards = Object.keys(PRICES.HAZARDS).filter(function(x){ return hz[x]; });
+      changed();
+    });
+  });
+
+  add(sec, "h2", "sec", "The price");
+  var out = add(sec, "div", "stack");
+  out.dataset.out = "qPrice";
+
+  function paint(){
+    var r = priceOf(q), t = C.quoteTotals(q.lines, q.gstOn, q.gstRate);
+    r.apps.forEach(function(a, i){
+      var u = uis[i], typed = j.apps[i];
+      var areaHint = i === 0 ? siteHint(q, typed) : "";
+      hintOf(u.area).textContent = areaHint;
+      hintOf(u.area).hidden = !areaHint;
+      u.label.hidden = a.rv !== "other";
+      /* The rule is the Quote Builder's. What shows is not left to chance: any box a message asks
+         for is on show, and so is any box holding a number that can't be read, so there's always
+         something to fix. Hours are the way out while the job is hourly and only wants hours. */
+      var hoursWay = a.hourly && (!a.poa || a.needHours);
+      u.price.hidden = hoursWay && !unreadable(typed.price);
+      u.price.classList.toggle("override", a.custom);
+      hintOf(u.price).textContent = a.custom ? "Your own price for this job." : !C.isZero(a.listP) ? "Straight off the price list. Change it for a one-off price." : "The price list has no rate for this one. Put your own price in.";
+      u.hoursRow.hidden = !(a.byHour || hoursWay || unreadable(typed.hours) || unreadable(typed.hourly));
+      u.hourly.classList.toggle("override", C.cmp(a.jobHourly, usual) !== 0);
+      var ownPriceWins = a.byHour && !a.hourly;
+      u.why.hidden = !(a.byHour || hoursWay);
+      u.why.textContent = ownPriceWins
+        ? "Charge by is set to the hour, but there are no hours in yet, so your own price of $" + C.decimal(a.price) + " a hectare is being used. Put the hours on site in and it charges by the hour."
+        : a.hourlyWhy;
+      if(a.poa && !a.onlyArea) u.more.open = true;
+    });
+    var each = "$" + C.decimal(r.setupEach);
+    hintOf(locF).textContent = r.locs > 0
+      ? each + " each operating location, " + C.moneyOf(C.mul(C.R(r.locs), r.setupEach)) + " on this job."
+      : each + " each operating location. Leave at 0 if you are not charging it.";
+    var wash = "$" + C.decimal(r.washEach);
+    hintOf(washF).textContent = r.washes > 0
+      ? wash + " each, " + C.moneyOf(C.mul(C.R(r.washes), r.washEach)) + " on this job."
+      : wash + " each. Leave at 0 if there is no wash down.";
+    hintOf(kmF).textContent = r.local
+      ? "Inside the " + C.decimal(r.localKm) + " km local zone. No travel charge."
+      : "Out of local range. " + C.decimal(r.minAwayHrs) + " hour minimum applies. Travel is the full round trip at " + C.moneyOf(r.travelRate) + "/km.";
+    priceOut(out, q, r, t);
+  }
+  return paint;
+}
+/* Every number on a priced quote that can't be read, in words. Any one of them stops it going out. */
+function quoteUnreadable(q, r, t){
+  var j = q.job || {}, out = r.bad.map(function(w){ return w + " can't be read. Numbers only, like 12.5."; });
+  q.lines.forEach(function(l, i){
+    if(t.lines[i].bad) out.push((String(l.desc || "").trim() || "A line you typed") + ": the quantity or the rate can't be read. Numbers only, like 12.5.");
+  });
+  if(t.gstBad) out.push("The GST rate can't be read. Numbers only, like 10.");
+  [["deposit","Deposit"],["validDays","Valid for, days"],["followDays","Follow up in, days"]].forEach(function(x){
+    if(unreadable(j[x[0]])) out.push(x[1] + " can't be read. Numbers only, like 12.5.");
+  });
+  return out;
+}
+function priceOut(out, q, r, t){
+  out.textContent = "";
+  add(out, "div", "q-basis", r.local ? "LOCAL / WITHIN " + C.decimal(r.localKm) + " KM" : "OUT OF RANGE / " + C.plainText(r.km) + " KM");
+  if(r.poa){
+    var box, stopped = r.apps.filter(function(a){ return a.poa; });
+    if(r.bad.length) box = note(out, "stop", "A number can't be read.", "Fix it and the price will work itself out.");
+    else if(stopped.every(function(a){ return a.onlyArea; })) box = note(out, "", "No price yet.");
+    else box = note(out, "", "P.O.A. Set your own price.", "The price list does not put a rate on this job. " + (stopped.some(function(a){ return a.byHour || a.needHours; })
+      ? "Put the hours on site in above and it works the whole quote out from there."
+      : stopped.some(function(a){ return C.isZero(a.area); })
+        ? "Put the hectares and your own figure in Price per hectare above, or switch Charge by to the hour."
+        : "Put your own figure in Price per hectare above, or switch Charge by to the hour."));
+    box.dataset.out = "qPoa";
+    var ul = add(box, "ul");
+    r.reasons.forEach(function(x){ add(ul, "li", null, x); });
+  }
+  /* the sheet won't let a quote out with one of these, so the form says so as well */
+  var unread = r.bad.length ? [] : quoteUnreadable(q, r, t);
+  if(unread.length && (r.poa || !t.bad)){
+    var sb = note(out, "stop", "A number on this quote can't be read.", "Fix it before you send this.");
+    sb.dataset.out = "qUnread";
+    var sl = add(sb, "ul");
+    unread.forEach(function(x){ add(sl, "li", null, x); });
+  }
+  var shown = q.lines.filter(function(l, i){ return !t.lines[i].blank || l.desc; });
+  if(shown.length){
+    var list = add(out, "div", "q-lines");
+    q.lines.forEach(function(l, i){
+      var c = t.lines[i];
+      if(c.blank && !l.desc) return;
+      var row = add(list, "div", "q-line"), d = add(row, "div", "q-line-d", l.desc);
+      var sub = l.auto ? l.note : [l.qty + (l.unit ? " " + l.unit : ""), l.rate ? "at " + rateText(l.rate) : ""].filter(Boolean).join(" ");
+      if(sub) add(d, "span", "q-line-c", sub);
+      add(row, "div", "q-line-a", c.bad ? "Check this" : c.total === null ? "" : C.money(c.total));
+    });
+  }
+  r.flags.forEach(function(f){
+    var w = add(out, "div", "q-flag" + (f.warn ? " warn" : ""));
+    add(w, "span", "q-flag-t", f.tag);
+    add(w, "span", null, f.txt);
+  });
+  if(r.poa){
+    if(shown.length) add(out, "p", "hint", "Your typed lines come to " + C.money(t.subtotal) + " on top of the P.O.A.");
+    return;
+  }
+  var box2 = add(out, "div", "totals panelish");
+  box2.id = "qTotals";
+  box2.innerHTML = totalsHtml(q, t);
+  var dep = depositOf(q);
+  if(dep > 0){
+    var dr = add(box2, "div");
+    add(dr, "span", null, "Deposit before the job (" + dep + "%)");
+    add(dr, "span", null, C.money(depositCents(q, t)));
+  }
+}
+/* the typed lines: the whole form on a typed quote, folded away on a priced one */
+function typedLines(host, q, save, refresh){
+  var n = 0;
+  q.lines.forEach(function(l, i){
+    if(l.auto) return;
+    n++;
+    var card = add(host, "div", "prod");
+    fld(card, "Line " + n + " description", input(l, "desc", {on: function(){ save(); if(q.job) refresh(); }}));
+    var r2 = add(card, "div", "two");
+    fld(r2, "Quantity", input(l, "qty", {num: true, strict: true, on: function(){ save(); refresh(); }}));
+    var un = input(l, "unit", {on: save});
+    un.setAttribute("list", "unitList");
+    fld(r2, "Unit", un);
+    fld(card, "Unit rate, $" + (q.gstOn ? " excluding GST" : ""), input(l, "rate", {num: true, strict: true, signed: true, on: function(){ save(); refresh(); }}));
+    add(card, "p", "line-total").id = "lt-" + l.id;
+    var acts = add(card, "div", "btns");
+    btn(acts, "Keep for reuse", "ghost small", function(){
+      if(!(l.desc || "").trim()){ toast("Give the line a description first."); return; }
+      var same = S.items.filter(function(it){ return it.desc === l.desc && it.unit === l.unit; })[0];
+      var it = same || {};
+      it.desc = l.desc; it.unit = l.unit; it.rate = l.rate;
+      put("items", it).then(function(){ toast("Kept for reuse"); rerender(); });
+    });
+    btn(acts, "Remove line", "danger small", function(){
+      if(!confirm("Remove this line?")) return;
+      /* the priced lines ahead of it come and go as the job is typed, so its place can have moved */
+      var at = q.lines.indexOf(l);
+      if(at >= 0) q.lines.splice(at, 1);
+      if(!q.job && !q.lines.length) q.lines.push(blankLine());
+      save();
+      rerender();
+    });
+  });
+  var dl = add(host, "datalist");
+  dl.id = "unitList";
+  ["ha","acre","hour","km","each","job"].forEach(function(u){ add(dl, "option").value = u; });
+  btn(host, "Add a line", "ghost", function(){ q.lines.push(blankLine()); save(); rerender(); });
+  if(S.items.length){
+    var pick = {v: ""};
+    fld(host, "Add a saved line", select(pick, "v", [["","Choose a saved line"]].concat(S.items.slice().sort(function(a, b){ return (a.desc || "").localeCompare(b.desc || ""); }).map(function(it){ return [it.id, it.desc]; })), {on: function(v){
+      var it = byId("items", v);
+      if(!it) return;
+      var site = byId("paddocks", q.paddockId);
+      /* a per hectare line picks up the site's hectares, ready to check */
+      q.lines.push({id: uid(), desc: it.desc, unit: it.unit, rate: it.rate, qty: it.unit === "ha" && site && site.ha ? site.ha : ""});
+      save();
+      rerender();
+    }}));
+  }
+}
 function quoteView(q){
   refreshDraftClient(q);
+  refreshDraftCard(q);
   push(function(){
     setTitle("Quote " + (q.number || ""));
     backBtn();
     var sec = add(app, "section");
-    var typedOnce = !!byId("quotes", q.id);
+    var typedOnce = !!byId("quotes", q.id), paint = null;
     function save(){ typedOnce = true; put("quotes", q).catch(function(){}); }
     function refresh(){
       var t = C.quoteTotals(q.lines, q.gstOn, q.gstRate);
@@ -3035,8 +3418,21 @@ function quoteView(q){
         var e = document.getElementById("lt-" + l.id), r = t.lines[i];
         if(e) e.textContent = r.bad ? "Check this line: numbers only" : r.total === null ? "" : "Line total " + C.money(r.total);
       });
+      if(paint){ paint(); return; }
       var box = document.getElementById("qTotals");
       if(box) box.innerHTML = totalsHtml(q, t);
+    }
+    var dupe = S.quotes.some(function(x){ return x.id !== q.id && x.number === q.number; });
+    function details(form){
+      var r = add(form, "div", "two");
+      fld(r, "Quote number", input(q, "number", {on: save}));
+      fld(r, "Date", input(q, "date", {type: "date", on: save}));
+      if(dupe) add(form, "p", "msg-bad", "Another quote already has this number.");
+      fld(form, "Status", select(q, "status", QUOTE_STATUS.map(function(s){ return [s, s]; }), {on: save}));
+    }
+    function gstForm(form){
+      chipRow(form, [["on","GST on"],["off","GST off"]], q.gstOn ? "on" : "off", function(v){ q.gstOn = v === "on"; save(); rerender(); });
+      if(q.gstOn) fld(form, "GST rate, %", input(q, "gstRate", {num: true, strict: true, need: true, on: function(){ save(); refresh(); }}));
     }
     var f = panelForm(sec);
     clientBox(f, q, function(c){ quoteClient(q, c); save(); rerender(); }, save);
@@ -3049,66 +3445,84 @@ function quoteView(q){
       }}));
     }
     fld(f, "Site or location", input(q, "location", {on: save}));
-    var r = add(f, "div", "two");
-    fld(r, "Quote number", input(q, "number", {on: save}));
-    fld(r, "Date", input(q, "date", {type: "date", on: save}));
-    if(S.quotes.some(function(x){ return x.id !== q.id && x.number === q.number; })) add(f, "p", "msg-bad", "Another quote already has this number.");
-    fld(f, "Status", select(q, "status", QUOTE_STATUS.map(function(s){ return [s, s]; }), {on: save}));
 
-    add(sec, "h2", "sec", "Line items");
-    q.lines.forEach(function(l, i){
-      var card = add(sec, "div", "prod");
-      fld(card, "Line " + (i + 1) + " description", input(l, "desc", {on: save}));
-      var r2 = add(card, "div", "two");
-      fld(r2, "Quantity", input(l, "qty", {num: true, on: function(){ save(); refresh(); }}));
-      var un = input(l, "unit", {on: save});
-      un.setAttribute("list", "unitList");
-      fld(r2, "Unit", un);
-      fld(card, "Unit rate, $" + (q.gstOn ? " excluding GST" : ""), input(l, "rate", {num: true, on: function(){ save(); refresh(); }}));
-      add(card, "p", "line-total").id = "lt-" + l.id;
-      var acts = add(card, "div", "btns");
-      btn(acts, "Keep for reuse", "ghost small", function(){
-        if(!(l.desc || "").trim()){ toast("Give the line a description first."); return; }
-        var same = S.items.filter(function(it){ return it.desc === l.desc && it.unit === l.unit; })[0];
-        var it = same || {};
-        it.desc = l.desc; it.unit = l.unit; it.rate = l.rate;
-        put("items", it).then(function(){ toast("Kept for reuse"); rerender(); });
-      });
-      btn(acts, "Remove line", "danger small", function(){
-        if(!confirm("Remove this line?")) return;
-        q.lines.splice(i, 1);
-        if(!q.lines.length) q.lines.push(blankLine());
+    if(q.job){
+      var sameCard = sameData(q.job.card, rateCard());
+      if(q.status !== "Draft" && !sameCard) note(sec, "", "This quote keeps the rates it was made with.", "Copy it to a new quote to use today's rates.");
+      if(q.ratesHeld && q.status === "Draft"){
+        if(sameCard) delete q.ratesHeld;
+        else {
+          var hn = note(sec, "", "This draft keeps the rates it was made with.", "It came through a backup and your rates on this phone are different, so its price hasn't moved.");
+          hn.dataset.out = "qHeld";
+          btn(hn, "Move it to this phone's rates", "small", function(){
+            delete q.ratesHeld;
+            jobUseCurrentCard(q);
+            save();
+            rerender();
+          });
+        }
+      }
+      var anyTyped = q.lines.some(function(l){ return !l.auto; });
+      if(!anyTyped) delete q.linesKept;
+      if(q.linesKept) note(sec, "", "Your old lines are still on this quote.", "They add on top of the price below. Take out any the price list now covers, or the job gets charged twice.").dataset.out = "qKept";
+      paint = jobForm(sec, q, save);
+      typedLines(add(fold(sec, "Extra lines you type yourself", anyTyped), "div", "stack"), q, save, refresh);
+      var j = q.job, gstStuck = q.gstOn && !C.parse(q.gstRate);
+      var more = foldForm(sec, "Number, status, GST, deposit and notes", dupe || gstStuck || unreadable(j.deposit) || unreadable(j.validDays) || unreadable(j.followDays));
+      details(more);
+      add(more, "span", "f-l", "GST");
+      gstForm(more);
+      fld(more, "Deposit, %", input(j, "deposit", {num: true, strict: true, on: function(){ save(); refresh(); }}));
+      var r3 = add(more, "div", "two");
+      fld(r3, "Valid for, days", input(j, "validDays", {num: true, strict: true, on: function(){ save(); refresh(); }}));
+      fld(r3, "Follow up in, days", input(j, "followDays", {num: true, strict: true, on: function(){ save(); refresh(); }}));
+      fld(more, "Reference", input(j, "ref", {ph: "Optional, theirs or yours", on: save}));
+      fld(more, "Lead source", select(j, "leadSource", LEAD_SOURCES.map(function(s){ return [s, s]; }), {on: save}));
+      fld(more, "Notes on the quote", input(q, "notes", {area: true, on: save}));
+    } else {
+      details(f);
+      add(sec, "h2", "sec", "Line items");
+      typedLines(sec, q, save, refresh);
+      btn(sec, "Work it out from the price list", "ghost", function(){
+        var kept = q.lines.filter(function(l){ return String(l.desc || "").trim() || String(l.qty || "").trim() || String(l.rate || "").trim(); });
+        if(kept.length && !confirm("Work this quote out from the price list?\n\nThe lines on it now stay on the quote and add on top of the price, so a job can get charged twice. Take out any line the price list now covers.")) return;
+        q.job = newJob();
+        q.lines = kept;
+        if(kept.length) q.linesKept = true;
+        fillSiteHa(q, byId("paddocks", q.paddockId));
+        writePriced(q);
         save();
         rerender();
       });
-    });
-    var dl = add(sec, "datalist");
-    dl.id = "unitList";
-    ["ha","acre","hour","km","each","job"].forEach(function(u){ add(dl, "option").value = u; });
-    btn(sec, "Add a line", "ghost", function(){ q.lines.push(blankLine()); save(); rerender(); });
-    if(S.items.length){
-      var pick = {v: ""};
-      fld(sec, "Add a saved line", select(pick, "v", [["","Choose a saved line"]].concat(S.items.slice().sort(function(a, b){ return (a.desc || "").localeCompare(b.desc || ""); }).map(function(it){ return [it.id, it.desc]; })), {on: function(v){
-        var it = byId("items", v);
-        if(!it) return;
-        var site = byId("paddocks", q.paddockId);
-        /* a per hectare line picks up the site's hectares, ready to check */
-        q.lines.push({id: uid(), desc: it.desc, unit: it.unit, rate: it.rate, qty: it.unit === "ha" && site && site.ha ? site.ha : ""});
-        save();
-        rerender();
-      }}));
+      add(sec, "h2", "sec", "GST");
+      gstForm(panelForm(sec));
+      var totals = add(sec, "div", "totals panelish");
+      totals.id = "qTotals";
+      fld(panelForm(sec), "Notes on the quote", input(q, "notes", {area: true, on: save}));
     }
-
-    add(sec, "h2", "sec", "GST");
-    var fg = panelForm(sec);
-    chipRow(fg, [["on","GST on"],["off","GST off"]], q.gstOn ? "on" : "off", function(v){ q.gstOn = v === "on"; save(); rerender(); });
-    if(q.gstOn) fld(fg, "GST rate, %", input(q, "gstRate", {num: true, on: function(){ save(); refresh(); }}));
-    var totals = add(sec, "div", "totals panelish");
-    totals.id = "qTotals";
-    fld(panelForm(sec), "Notes on the quote", input(q, "notes", {area: true, on: save}));
     btn(sec, "View, share or print", "", function(){ save(); quoteSheet(q); });
     btn(sec, "Copy to a new quote", "ghost", function(){ save(); copyQuote(q); });
     btn(sec, "Start a job from this quote", "ghost", function(){ save(); jobFromQuote(q); });
+    if(q.job) btn(sec, "Just type my own lines", "ghost", function(){
+      var priced = priceOf(q).poa ? "Nothing is priced on this job yet, so no priced lines come across." : "What's priced now stays as typed lines, with its wording.";
+      if(!confirm("Stop working this quote out from the price list?\n\n" + priced + "\n\nThe hazards, deposit, valid days, follow up days, reference and lead source come off this quote.")) return;
+      q.lines.forEach(function(l){
+        if(!l.auto) return;
+        /* the water rate, the product and "Lifted to the minimum" live in the note, which a typed line hasn't got */
+        var n = String(l.note || "").replace(/\.\s+\.\s+/g, ". ").trim().replace(/\.$/, "");
+        if(n) l.desc = l.desc + ". " + n;
+        l.id = uid();
+        delete l.auto;
+        delete l.note;
+      });
+      delete q.job;
+      delete q.poa;
+      delete q.linesKept;
+      delete q.ratesHeld;
+      if(!q.lines.length) q.lines.push(blankLine());
+      save();
+      rerender();
+    });
     if(typedOnce) btn(sec, "Delete this quote", "danger", function(){
       if(!confirm("Delete this quote for good?")) return;
       del("quotes", q.id).then(back);
@@ -3123,7 +3537,9 @@ function copyQuote(q){
   n.number = nextQuoteNumber();
   n.date = todayISO();
   n.status = "Draft";
-  n.lines.forEach(function(l){ l.id = uid(); });
+  delete n.ratesHeld;
+  n.lines.forEach(function(l){ if(!l.auto) l.id = uid(); });
+  if(n.job) jobUseCurrentCard(n);
   put("quotes", n).then(function(){ quoteView(n); });
 }
 function jobFromQuote(q){
@@ -3134,6 +3550,7 @@ function jobFromQuote(q){
   jobView(j);
 }
 function quoteText(q){
+  if(q.job) return pricedText(q);
   var b = cfg().business || {}, qc = quoteCfg(), t = C.quoteTotals(q.lines, q.gstOn, q.gstRate), out = [];
   if(b.name) out.push(b.name);
   out.push("Quote " + q.number + ". " + fmtDate(q.date), "");
@@ -3172,7 +3589,41 @@ function copyText(text, done){
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
   else fallback();
 }
+/* Once a quote has gone anywhere it isn't a draft any more, so it stops moving with today's rates. */
+function markGone(q, st){
+  if(q.status !== "Draft") return "";
+  q.status = "Quoted";
+  if(st) st.value = "Quoted";
+  put("quotes", q).catch(function(){});
+  return " Marked as Quoted.";
+}
+function toastGone(q, st){
+  var m = markGone(q, st);
+  if(m) toast(m.trim());
+}
+function shareQuoteText(q, st){
+  var text = quoteText(q);
+  function copied(){ toast("Copied. Paste it into an email or message." + markGone(q, st)); }
+  if(navigator.share){
+    navigator.share({title: "Quote " + q.number, text: text}).then(function(){ toast("Handed to your phone's share menu. Nothing is sent until you send it there." + markGone(q, st)); }, function(e){
+      if(e && e.name !== "AbortError") copyText(text, copied);
+    });
+  } else copyText(text, copied);
+}
+function copyQuoteText(q, st){
+  copyText(quoteText(q), function(){ toast("Copied. Paste it into an email or message." + markGone(q, st)); });
+}
+function saveQuoteCsv(q, st){
+  shareFile(new Blob([csvQuoteLines(q)], {type: "text/csv"}), "Quote-" + safeName(q.number) + ".csv", "Quote " + q.number).then(function(done){
+    if(done) toastGone(q, st);
+  });
+}
+function printQuote(q, st){
+  window.print();
+  toastGone(q, st);
+}
 function quoteSheet(q){
+  if(q.job){ pricedSheet(q); return; }
   refreshDraftClient(q);
   push(function(){
     setTitle("Quote " + q.number);
@@ -3180,21 +3631,15 @@ function quoteSheet(q){
     var sec = add(app, "section");
     var b = cfg().business || {}, qc = quoteCfg(), t = C.quoteTotals(q.lines, q.gstOn, q.gstRate);
     var ctl = add(sec, "div", "stack no-print");
-    fld(ctl, "Status", select(q, "status", QUOTE_STATUS.map(function(s){ return [s, s]; }), {on: function(){ put("quotes", q).catch(function(){}); }}));
+    var st = select(q, "status", QUOTE_STATUS.map(function(s){ return [s, s]; }), {on: function(){ put("quotes", q).catch(function(){}); }});
+    fld(ctl, "Status", st);
     btn(ctl, "Edit this quote", "", function(){ quoteView(q); });
     var a1 = add(ctl, "div", "btns");
-    var sh = btn(a1, "Share as text", "ghost", function(){
-      var text = quoteText(q);
-      if(navigator.share){
-        navigator.share({title: "Quote " + q.number, text: text}).then(function(){ toast("Handed to your phone's share menu. Nothing is sent until you send it there."); }, function(e){
-          if(e && e.name !== "AbortError") copyText(text, function(){ toast("Copied. Paste it into an email or message."); });
-        });
-      } else copyText(text, function(){ toast("Copied. Paste it into an email or message."); });
-    });
-    var cp = btn(a1, "Copy text", "ghost", function(){ copyText(quoteText(q), function(){ toast("Copied. Paste it into an email or message."); }); });
+    var sh = btn(a1, "Share as text", "ghost", function(){ shareQuoteText(q, st); });
+    var cp = btn(a1, "Copy text", "ghost", function(){ copyQuoteText(q, st); });
     var a2 = add(ctl, "div", "btns");
-    var pr = btn(a2, "Print or save PDF", "ghost", function(){ window.print(); });
-    btn(a2, "Save CSV", "ghost", function(){ shareFile(new Blob(["﻿" + csvQuoteLines(q)], {type: "text/csv"}), "Quote-" + safeName(q.number) + ".csv", "Quote " + q.number); });
+    var pr = btn(a2, "Print or save PDF", "ghost", function(){ printQuote(q, st); });
+    btn(a2, "Save CSV", "ghost", function(){ saveQuoteCsv(q, st); });
     if(t.bad){ sh.disabled = true; cp.disabled = true; pr.disabled = true; }
     var a3 = add(ctl, "div", "btns");
     btn(a3, "Copy to a new quote", "ghost", function(){ copyQuote(q); });
@@ -3229,6 +3674,511 @@ function quoteSheet(q){
   markRoute({k: "sheet", rid: q.id});
 }
 
+/* ─────────── the priced quote: its text, its document, its PDF and its Pipeline row ─────────── */
+/* The customer text, line for line as the Quote Builder writes it. Only the quote number on the
+   second line, GST off, typed lines and notes are this app's own. */
+function pricedText(q){
+  var r = priceOf(q), t = C.quoteTotals(q.lines, q.gstOn, q.gstRate), w = quoteCfg().words, b = quoteBusiness();
+  var dep = depositOf(q), W = 56, L = [];
+  function row(a, c){ return String(a).padEnd(W) + String(c).padStart(12); }
+  var contact = String(q.contact || "").trim(), biz = String(q.clientName || "").trim(), job = String(q.location || "").trim();
+  L.push(String(b.name || "").toUpperCase());
+  L.push("Quote " + q.number + ". " + longDate(quoteDate(q)));
+  L.push("");
+  if(contact) L.push(contact);
+  if(biz) L.push(biz);
+  if(contact || biz) L.push("");
+
+  L.push("THE JOB");
+  if(job) L.push(job);
+  var many = r.apps.length > 1, ind = many ? "   " : "";
+  r.apps.forEach(function(a, k){
+    L.push((many ? (k + 1) + ". " : "") + a.name + (!C.isZero(a.area) ? ", " + C.plainText(a.area) + " ha" : ""));
+    if(a.label) L.push(ind + (a.rv === "other" ? "Application" : PRICES.META[a.svc].rateLabel) + ": " + a.label);
+    if(a.product) L.push(ind + "Product: " + a.product);
+  });
+  if(r.hz.length) L.push("Hazards noted: " + r.hzText + ".");
+  if(!r.apps.some(function(a){ return a.product; })) L.push("Product: supplied by you.");
+  L.push("");
+
+  function typedRows(){
+    q.lines.forEach(function(l, i){
+      var c = t.lines[i];
+      if(l.auto || (c.blank && !l.desc)) return;
+      L.push(row(l.desc, c.total === null ? "" : C.money(c.total)));
+      if(String(l.qty || "").trim()) L.push("  " + l.qty + (l.unit ? " " + l.unit : "") + (l.rate ? " at " + rateText(l.rate) : ""));
+    });
+  }
+  if(r.poa){
+    L.push("PRICE");
+    L.push("Price on application. This job sits outside the standard rates:");
+    r.reasons.forEach(function(x){ L.push("  - " + x); });
+    L.push("");
+    L.push("Happy to look at a map or walk the block and give you a firm");
+    L.push("number. Give me a call.");
+    if(q.lines.length){ L.push(""); L.push("ALSO ON THIS QUOTE, ON TOP OF THE ABOVE"); typedRows(); }
+  } else {
+    L.push("PRICE");
+    q.lines.forEach(function(l, i){
+      if(!l.auto) return;
+      L.push(row(l.desc, C.money(t.lines[i].total)));
+      L.push("  " + l.note);
+    });
+    typedRows();
+    L.push(row("", "------------"));
+    L.push(row(q.gstOn ? "Subtotal, excluding GST" : "Subtotal", C.money(t.subtotal)));
+    if(q.gstOn) L.push(row("GST", C.money(t.gst)));
+    L.push(row("", "============"));
+    L.push(row(q.gstOn ? "TOTAL INCLUDING GST" : "TOTAL", C.money(t.total)));
+    L.push("");
+    if(dep > 0){
+      L.push("Deposit of " + dep + "% (" + C.money(depositCents(q, t)) + ") before the job starts.");
+      L.push("Balance within 7 days of invoice.");
+    }
+  }
+  if(q.notes) L.push("", q.notes);
+
+  L.push("");
+  L.push("WHAT I NEED FROM YOU");
+  var need = String(w.textNeed || "").split("\n");
+  if(r.anyAir && w.textAir){
+    var at = need.length - 1;
+    while(at > 0 && need[at].charAt(0) !== "-") at--;
+    Array.prototype.splice.apply(need, [at, 0].concat(w.textAir.split("\n")));
+  }
+  need.forEach(function(x){ L.push(x); });
+  L.push("");
+  L.push("TERMS");
+  String(w.textTerms || "").split("\n").forEach(function(x){ L.push(x); });
+  /* the licence line, never the footer: a footer was typed for typed quotes and could say anything */
+  if(String(w.licence || "").trim()){
+    L.push("");
+    L.push("LICENSED AND INSURED");
+    String(w.licence).split("\n").forEach(function(x){ L.push(x); });
+  }
+  L.push("");
+  [b.signText, b.name, b.phone, b.email, b.abn ? "ABN " + b.abn : ""].filter(Boolean).forEach(function(x){ L.push(x); });
+  return L.join("\n");
+}
+/* Everything the document says, in one place, so the screen and the PDF can't disagree. */
+function docParts(q){
+  var r = priceOf(q), t = C.quoteTotals(q.lines, q.gstOn, q.gstRate), w = quoteCfg().words, b = quoteBusiness(), j = q.job;
+  var dep = depositOf(q);
+  var billTo = [q.contact ? "Attn: " + q.contact : "", q.clientName, q.location, q.email, q.phone].map(function(x){ return String(x || "").trim(); }).filter(Boolean);
+  if(!billTo.length) billTo.push("Client details not filled in yet");
+  var ours = [b.name ? "trading as " + b.name : ""].concat(String(b.address || "").split("\n"), [b.abn ? "ABN " + b.abn : "", b.email, b.phone]).filter(Boolean);
+  var figs = [
+    {k: r.poa ? "Price" : q.gstOn ? "Total inc GST" : "Total", v: r.poa ? "P.O.A." : C.money(t.total), big: true},
+    {k: "Valid until", v: shortDate(addDays(quoteDate(q), Math.max(1, Math.round(parseFloat(j.validDays) || 30))))},
+    {k: "Issue date", v: shortDate(quoteDate(q))},
+    {k: "Quote number", v: q.number || ""}
+  ];
+  if(String(j.ref || "").trim()) figs.push({k: "Reference", v: j.ref.trim()});
+  var tax = q.gstOn ? q.gstRate + "%" : "";
+  var rows = [];
+  q.lines.forEach(function(l, i){
+    var c = t.lines[i];
+    if(c.blank && !l.desc) return;
+    /* a priced line says which one it is, so it can't pick up its neighbour's figures */
+    var src = l.auto ? r.lines[parseInt(String(l.id).slice(4), 10)] : null;
+    rows.push({
+      d: l.desc, sub: l.auto ? l.note : "",
+      q: src ? src.q : String(l.qty || "") + (l.unit ? " " + l.unit : ""),
+      u: src ? (src.u ? C.moneyOf(src.u).replace("$", "") : "") : rateText(l.rate).replace("$", ""),
+      tax: tax, a: c.total === null ? "" : C.money(c.total).replace("$", "")
+    });
+  });
+  var totals = [[q.gstOn ? "Subtotal" : "Subtotal, no GST", C.money(t.subtotal).replace("$", "")]];
+  if(q.gstOn) totals.push(["Total GST " + q.gstRate + "%", C.money(t.gst).replace("$", "")]);
+  totals.push([q.gstOn ? "Total inc GST" : "Total", C.money(t.total), "grand"]);
+  if(dep > 0) totals.push(["Deposit before the job (" + dep + "%)", C.money(depositCents(q, t)), "dep"]);
+  var need = String(w.docNeed || "").split("\n").filter(Boolean);
+  if(r.anyAir && w.docAir) need.splice(Math.max(0, need.length - 1), 0, w.docAir);
+  var terms = String(w.docTerms || "").split("\n").filter(Boolean);
+  if(dep > 0 && terms[0]) terms[0] = terms[0].replace(/^Deposit before/, "Deposit of " + dep + "% before");
+  return {
+    r: r, t: t, billTo: billTo, legal: b.legal || b.name || "", ours: ours, figs: figs, rows: rows, totals: totals, need: need, terms: terms,
+    poaCall: "Happy to look at a map or walk the block and give you a firm price." + (b.signText && b.phone ? " Give " + b.signText + " a call on " + b.phone + "." : ""),
+    licence: String(w.licence || "").replace(/\s*\n\s*/g, " ").trim(), notes: q.notes || "",
+    sign: [b.signDoc, b.name, b.phone, b.email].filter(Boolean), logoAlt: b.name || ""
+  };
+}
+function quoteDoc(host, q){
+  var d = docParts(q), doc = add(host, "div", "qdoc");
+  var top = add(doc, "div", "qd-top");
+  add(top, "div", "qd-title", "Quote");
+  var logo = add(top, "img", "qd-logo");
+  logo.src = self.STEL_LOGO;
+  logo.alt = d.logoAlt;
+  function lines(p, list){ list.forEach(function(x){ add(p, "div", null, x); }); }
+  var par = add(doc, "div", "qd-parties");
+  var p1 = add(par, "div", "qd-party");
+  add(p1, "div", "qd-lbl", "Prepared for");
+  lines(p1, d.billTo);
+  var p2 = add(par, "div", "qd-party right");
+  add(p2, "div", "qd-lbl", d.legal);
+  lines(p2, d.ours);
+  var figs = add(doc, "div", "qd-figs");
+  d.figs.forEach(function(f){
+    var w = add(figs, "div", "qd-fig" + (f.big ? " big" : ""));
+    add(w, "div", "k", f.k);
+    add(w, "div", "v", f.v);
+  });
+  add(doc, "div", "qd-rule");
+  if(d.r.poa){
+    var pb = add(doc, "div", "qd-poa");
+    add(pb, "b", null, "Price on application");
+    add(pb, "div", null, "This job sits outside our standard rates, so we will not put a number on it sight unseen:");
+    var ul = add(pb, "ul");
+    d.r.reasons.forEach(function(x){ add(ul, "li", null, x); });
+    add(pb, "div", "qd-gap", d.poaCall);
+  }
+  if(d.rows.length){
+    var tb = add(add(doc, "div", "tblw"), "table", "qd-items");
+    var hr = add(add(tb, "thead"), "tr");
+    ["Description","Quantity","Price","Tax","Amount"].forEach(function(h){ add(hr, "th", null, h); });
+    var bd = add(tb, "tbody");
+    d.rows.forEach(function(x){
+      var tr = add(bd, "tr"), c = add(tr, "td", null, x.d);
+      if(x.sub) add(c, "span", "qd-sub", x.sub);
+      add(tr, "td", "qd-num", x.q);
+      add(tr, "td", "qd-num", x.u);
+      add(tr, "td", "qd-num", x.tax);
+      add(tr, "td", "qd-num", x.a);
+    });
+  }
+  if(!d.r.poa){
+    var tt = add(add(doc, "div", "qd-totals"), "table"), tbody = add(tt, "tbody");
+    d.totals.forEach(function(x){
+      var tr = add(tbody, "tr", x[2] || null);
+      add(tr, "td", null, x[0]);
+      add(tr, "td", "qd-num", x[1]);
+    });
+  }
+  if(d.notes) add(doc, "p", "pre qd-notes", d.notes);
+  var cols = add(doc, "div", "qd-cols");
+  [["What we need from you", d.need], ["Terms", d.terms]].forEach(function(g){
+    var col = add(cols, "div", "qd-col");
+    add(col, "div", "qd-h", g[0]);
+    var u = add(col, "ul");
+    g[1].forEach(function(x){ add(u, "li", null, x); });
+  });
+  if(d.r.hz.length){
+    var hz = add(doc, "div", "qd-lic");
+    add(hz, "b", null, "Hazards noted on site. ");
+    hz.appendChild(document.createTextNode(d.r.hzText + ". Please confirm these are complete before we fly."));
+  }
+  if(d.licence){
+    var lic = add(doc, "div", "qd-lic");
+    add(lic, "b", null, "Licensed and insured. ");
+    lic.appendChild(document.createTextNode(d.licence));
+  }
+  var sign = add(doc, "div", "qd-sign");
+  lines(sign, d.sign);
+}
+function quotePdf(q){
+  return loadScript("./vendor/jspdf.umd.min.js").then(function(){
+    var d = docParts(q), doc = new window.jspdf.jsPDF({unit: "mm", format: "a4"});
+    var W = 210, M = 14, CW = W - M * 2, BOTTOM = 282, y = M, BLUE = [38, 34, 97], INK = [17, 17, 17], SOFT = [85, 85, 85];
+    function need(h){ if(y + h > BOTTOM){ doc.addPage(); y = M; } }
+    function font(size, bold, col){
+      doc.setFontSize(size);
+      doc.setFont("helvetica", bold ? "bold" : "normal");
+      var c = col || INK;
+      doc.setTextColor(c[0], c[1], c[2]);
+    }
+    function wrap(s, w){ return doc.splitTextToSize(pdfSafe(s), w); }
+    function rule(col, wide){ doc.setDrawColor(col[0], col[1], col[2]); doc.setLineWidth(wide); doc.line(M, y, W - M, y); }
+
+    font(22, true);
+    doc.text("Quote", M, y + 7);
+    doc.addImage(self.STEL_LOGO, "PNG", W - M - 48, y - 3, 48, 48 * 200 / 440);
+    y += 24;
+
+    var startY = y;
+    font(9, true);
+    doc.text("Prepared for", M, y);
+    y += 4;
+    font(9, false);
+    d.billTo.forEach(function(s){ wrap(s, CW / 2 - 4).forEach(function(l){ doc.text(l, M, y); y += 4; }); });
+    var leftEnd = y;
+    y = startY;
+    font(9, true);
+    doc.text(pdfSafe(d.legal), W - M, y, {align: "right"});
+    y += 4;
+    font(9, false);
+    d.ours.forEach(function(s){ wrap(s, CW / 2 - 4).forEach(function(l){ doc.text(l, W - M, y, {align: "right"}); y += 4; }); });
+    y = Math.max(leftEnd, y) + 3;
+
+    var x = M;
+    d.figs.forEach(function(f){
+      font(8, false, SOFT);
+      doc.text(f.k, x, y);
+      font(f.big ? 14 : 11, true);
+      var v = pdfSafe(f.v);
+      doc.text(v, x, y + 6);
+      x += Math.max(doc.getTextWidth(v), 22) + 8;
+    });
+    y += 10;
+    rule(BLUE, .6);
+    y += 5;
+
+    if(d.r.poa){
+      font(10, true);
+      doc.text("Price on application", M, y);
+      y += 5;
+      font(9, false);
+      wrap("This job sits outside our standard rates, so we will not put a number on it sight unseen:", CW).forEach(function(l){ doc.text(l, M, y); y += 4; });
+      d.r.reasons.forEach(function(s){ wrap("- " + s, CW - 3).forEach(function(l){ need(4); doc.text(l, M + 3, y); y += 4; }); });
+      y += 1;
+      wrap(d.poaCall, CW).forEach(function(l){ need(4); doc.text(l, M, y); y += 4; });
+      y += 4;
+    }
+    if(d.rows.length){
+      var cols = [{t: "Description", w: 92, l: true}, {t: "Quantity", w: 26}, {t: "Price", w: 22}, {t: "Tax", w: 12}, {t: "Amount", w: 30}];
+      var head = function(){
+        font(8, true, SOFT);
+        var cx = M;
+        cols.forEach(function(c){ cx += c.w; if(c.l) doc.text(c.t, M, y); else doc.text(c.t, cx, y, {align: "right"}); });
+        y += 1.5;
+        rule([187, 187, 187], .2);
+        y += 4;
+      };
+      head();
+      d.rows.forEach(function(x2){
+        font(9, false);
+        var dl = wrap(x2.d, 88);
+        font(8, false, SOFT);
+        var sl = x2.sub ? wrap(x2.sub, 88) : [];
+        var h = dl.length * 4 + sl.length * 3.4 + 2;
+        if(y + h > BOTTOM){ doc.addPage(); y = M; head(); }
+        var yy = y;
+        font(9, false);
+        dl.forEach(function(l){ doc.text(l, M, yy); yy += 4; });
+        font(8, false, SOFT);
+        sl.forEach(function(l){ doc.text(l, M, yy); yy += 3.4; });
+        font(9, false);
+        var cx = M + cols[0].w;
+        [x2.q, x2.u, x2.tax, x2.a].forEach(function(v, i){ cx += cols[i + 1].w; doc.text(pdfSafe(v), cx, y, {align: "right"}); });
+        y += h;
+        rule([226, 226, 226], .2);
+        y += 4;
+      });
+    }
+    if(!d.r.poa){
+      need(d.totals.length * 6 + 4);
+      d.totals.forEach(function(x2){
+        var big = x2[2] === "grand";
+        font(big ? 11 : 9.5, big || x2[2] === "dep", x2[2] === "dep" ? BLUE : big ? INK : SOFT);
+        doc.text(pdfSafe(x2[0]), W - M - 40, y, {align: "right"});
+        font(big ? 11 : 9.5, big || x2[2] === "dep", x2[2] === "dep" ? BLUE : INK);
+        doc.text(pdfSafe(x2[1]), W - M, y, {align: "right"});
+        y += big ? 6 : 5;
+      });
+      y += 2;
+    }
+    if(d.notes){
+      font(9, false);
+      wrap(d.notes, CW).forEach(function(l){ need(4); doc.text(l, M, y); y += 4; });
+      y += 2;
+    }
+    function bullets(title, list, cx, cw){
+      var yy = y;
+      font(8, true, BLUE);
+      doc.text(title.toUpperCase(), cx, yy);
+      yy += 4.5;
+      font(8.2, false);
+      list.forEach(function(s){ wrap("- " + s, cw).forEach(function(l){ doc.text(l, cx, yy); yy += 3.6; }); yy += .6; });
+      return yy;
+    }
+    /* the two columns stay on one page together */
+    font(8.2, false);
+    var cw = CW / 2 - 4;
+    function colH(list){ return list.reduce(function(s, x2){ return s + wrap("- " + x2, cw).length * 3.6 + .6; }, 5); }
+    need(Math.max(colH(d.need), colH(d.terms)) + 2);
+    y += 2;
+    var e1 = bullets("What we need from you", d.need, M, cw), e2 = bullets("Terms", d.terms, M + CW / 2 + 4, cw);
+    y = Math.max(e1, e2) + 2;
+    function lic(head2, body){
+      font(8.2, false);
+      var ls = wrap(head2 + " " + body, CW);
+      need(ls.length * 3.8 + 4);
+      rule([221, 221, 221], .2);
+      y += 4;
+      ls.forEach(function(l){ doc.text(l, M, y); y += 3.8; });
+      y += 1;
+    }
+    if(d.r.hz.length) lic("Hazards noted on site.", d.r.hzText + ". Please confirm these are complete before we fly.");
+    if(d.licence) lic("Licensed and insured.", d.licence);
+    y += 2;
+    font(9, false);
+    need(d.sign.length * 4);
+    d.sign.forEach(function(s){ doc.text(pdfSafe(s), M, y); y += 4; });
+
+    var pages = doc.getNumberOfPages();
+    for(var i = 1; i <= pages; i++){
+      doc.setPage(i);
+      font(7.5, false, SOFT);
+      doc.text("Page " + i + " of " + pages, W - M, 291, {align: "right"});
+    }
+    return doc.output("blob");
+  });
+}
+/* the 13 columns of the owner's CRM Pipeline tab, as the Quote Builder fills them */
+var PIPE_COLS = [["A","Date Quoted"],["B","Property / Business Name"],["C","Contact Name"],["D","Email"],["E","Phone"],["F","Service Quoted"],["G","Area (ha)"],["H","Quote Value ($ ex GST)"],["I","Status"],["J","Date Won / Lost"],["K","Reason if Lost"],["L","Follow Up Date"],["M","Notes"]];
+function pipeCells(q){
+  var r = priceOf(q), t = C.quoteTotals(q.lines, q.gstOn, q.gstRate), j = q.job, notes = [];
+  var many = r.apps.length > 1;
+  if(r.poa){
+    notes.push("P.O.A.");
+    r.reasons.forEach(function(x){ notes.push(x.replace(/\.$/, "")); });
+  } else {
+    r.apps.forEach(function(a){
+      var pre = many ? a.crm + " " : "", tail = a.product ? " (" + a.product + ")" : "";
+      if(a.hourly) notes.push(pre + C.plainText(a.hrs) + " hrs @ $" + C.plainText(a.jobHourly) + "/hr" + tail);
+      else notes.push(pre + C.plainText(a.area) + " ha @ $" + C.plainText(a.price) + "/ha, " + a.label + (a.custom ? ", own price" : "") + tail);
+    });
+    if(r.minApplied) notes.push("minimum charge applied");
+    if(r.locs > 1) notes.push(r.locs + " operating locations");
+    if(r.washes > 0) notes.push(r.washes + " wash down" + (r.washes > 1 ? "s" : "") + " " + C.moneyOf(r.wash));
+    if(!r.local) notes.push(C.plainText(r.km) + " km out, travel " + C.moneyOf(r.travel));
+    notes.push((q.gstOn ? "Total inc GST " : "Total ") + C.money(t.total));
+  }
+  if(r.hz.length) notes.push("Hazards: " + r.hzText);
+  var job = String(q.location || "").trim();
+  if(job) notes.push(job);
+  if(j.leadSource) notes.push("Lead: " + j.leadSource);
+  var follow = addDays(quoteDate(q), Math.max(0, Math.round(parseFloat(j.followDays) || 0)));
+  return [
+    slashDate(quoteDate(q)),
+    String(q.clientName || "").trim(),
+    String(q.contact || "").trim(),
+    String(q.email || "").trim(),
+    String(q.phone || "").trim(),
+    r.apps.map(function(a){ return a.crm; }).filter(function(v, k, arr){ return arr.indexOf(v) === k; }).join(", "),
+    C.isZero(r.area) ? "" : C.plainText(r.area),
+    r.poa ? "" : plain(t.subtotal),
+    /* the CRM has no Draft: copying the row across is what makes it quoted */
+    q.status === "Draft" ? "Quoted" : q.status,
+    "",
+    "",
+    slashDate(follow),
+    notes.join(". ")
+  ];
+}
+function pricedSheet(q){
+  refreshDraftClient(q);
+  refreshDraftCard(q);
+  push(function(){
+    setTitle("Quote " + q.number);
+    backBtn();
+    var sec = add(app, "section");
+    var t = C.quoteTotals(q.lines, q.gstOn, q.gstRate), stuck = quoteUnreadable(q, priceOf(q), t);
+    /* a number nobody can read stops every way out, and the page says which number */
+    if(stuck.length){
+      var why = note(sec, "stop", "This quote can't go out yet.", "A number on it can't be read, so sharing, copying, the PDF, printing, the Pipeline row and the CSV are all stopped. Tap Edit this quote and fix it.");
+      why.dataset.out = "qStuck";
+      var wl = add(why, "ul");
+      stuck.forEach(function(x){ add(wl, "li", null, x); });
+    }
+    var ctl = add(sec, "div", "stack no-print");
+    var st = select(q, "status", QUOTE_STATUS.map(function(s){ return [s, s]; }), {on: function(){ put("quotes", q).catch(function(){}); rerender(); }});
+    fld(ctl, "Status", st);
+    btn(ctl, "Edit this quote", "", function(){ quoteView(q); });
+    var a1 = add(ctl, "div", "btns");
+    var sh = btn(a1, "Share as text", "ghost", function(){ shareQuoteText(q, st); });
+    var cp = btn(a1, "Copy text", "ghost", function(){ copyQuoteText(q, st); });
+    var a2 = add(ctl, "div", "btns");
+    var pd = btn(a2, "Save as PDF", "ghost", function(){
+      quotePdf(q).then(function(blob){ return shareFile(blob, "Quote-" + safeName(q.number) + ".pdf", "Quote " + q.number); }).then(function(done){
+        if(done) toastGone(q, st);
+      }).catch(function(e){ toast("The PDF didn't build. " + e.message); });
+    });
+    var pr = btn(a2, "Print", "ghost", function(){ printQuote(q, st); });
+    var cs = btn(ctl, "Save CSV", "ghost", function(){ saveQuoteCsv(q, st); });
+    var a3 = add(ctl, "div", "btns");
+    btn(a3, "Copy to a new quote", "ghost", function(){ copyQuote(q); });
+    btn(a3, "Start a job", "ghost", function(){ jobFromQuote(q); });
+
+    var pf = fold(ctl, "Pipeline row for STEL-CRM", false);
+    var pw = add(add(pf, "div", "panel"), "div", "form");
+    add(pw, "p", "hint", "Open the CRM workbook, click the Pipeline tab, click the first empty cell in column A, paste. It fills all thirteen columns.");
+    var cells = stuck.length ? [] : pipeCells(q);
+    var pc = btn(pw, "Copy pipeline row", "", function(){ copyText(cells.join("\t"), function(){ toast("Copied, now paste." + markGone(q, st)); }); });
+    if(stuck.length){
+      [sh, cp, pd, pr, cs, pc].forEach(function(b){ b.disabled = true; });
+      return;
+    }
+    var dl = add(pw, "div", "pipe-cols");
+    dl.dataset.out = "pipeRow";
+    cells.forEach(function(v, i){
+      var row = add(dl, "div");
+      add(row, "span", "pipe-k", PIPE_COLS[i][0] + ". " + PIPE_COLS[i][1]);
+      add(row, "span", null, v || "-");
+    });
+    add(pw, "p", "hint", "Quote Value goes in excluding GST, same as the rest of your sheet. Follow Up Date is the column that goes amber when it falls due, so do not leave it blank.");
+
+    var tf = fold(ctl, "The quote as text", false);
+    add(tf, "pre", "q-text", quoteText(q)).dataset.out = "quoteText";
+
+    quoteDoc(add(sec, "div", "sheet"), q);
+  });
+  markRoute({k: "sheet", rid: q.id});
+}
+/* the rate card under Backup and setup */
+function ratesForm(form){
+  var card = rateCard();
+  function saveIt(){ saveCfg().catch(function(){}); }
+  add(form, "p", "hint", (cfg().ratesFrom ? "These started from the rates saved in the Quote Builder on this phone. " : "") + "Changes here stay on this phone and go in your backup. A draft moves to these rates when you next open it. Sharing, copying, printing or saving a quote marks it Quoted, and then it keeps the rates it went with. GST is under Quotes, below.");
+  [["spray","Spraying, by water rate"],["spread","Spreading, by load"],["map","Mapping, by type"]].forEach(function(g){
+    add(form, "h3", null, g[1]);
+    card[g[0]].forEach(function(o){
+      var row = add(form, "div", "two");
+      fld(row, "Name", input(o, "t", {on: saveIt}));
+      fld(row, "$ a hectare", input(o, "r", {num: true, strict: true, on: saveIt}));
+    });
+  });
+  add(form, "h3", null, "Everything else");
+  [["hourly","Hourly rate, $"],["setup","Set up per location, $"],["washFee","Wash down fee, $"],["localKm","Free travel zone, km"],
+   ["travelSpray","Travel, spray and spread, $ a km"],["travelMap","Travel, mapping, $ a km"],["minLocalHrs","Minimum hours, local"],["minAwayHrs","Minimum hours, out of range"],
+   ["minMapping","Minimum charge, mapping, $"],["spreadCut","Spreading goes hourly under, ha"],["mapCut","Mapping goes hourly under, ha"]].forEach(function(x){
+    fld(form, x[1], input(card, x[0], {num: true, strict: true, on: saveIt}));
+  });
+  btn(form, "Reset to the price list", "ghost", function(){
+    if(!confirm("Put every rate back to the price list?")) return;
+    cfg().rates = clone(PRICES.DEFAULTS);
+    saveIt();
+    rerender();
+  });
+}
+/* the wording under Backup and setup */
+function wordingForm(form){
+  var qc = quoteCfg(), w = qc.words, b = w.business;
+  function saveIt(){ saveCfg().catch(function(){}); }
+  function one(p, label, obj, key, area){
+    var n = input(obj, key, {area: !!area, on: saveIt});
+    n.dataset.f = "w-" + key;
+    fld(p, label, n);
+  }
+  add(form, "p", "hint", "This is what prints on a quote worked out from the price list. Your business name, ABN, phone, email and address come from Your business above.");
+  one(form, "Trust or legal name", b, "legal");
+  one(form, "Sign off on the text", b, "signText");
+  one(form, "Sign off on the document", b, "signDoc");
+  one(form, "Licence line, printed under Licensed and insured", w, "licence", true);
+  one(form, "What I need from you, on the text", w, "textNeed", true);
+  one(form, "Spray and spread jobs also need, on the text", w, "textAir", true);
+  one(form, "Terms, on the text", w, "textTerms", true);
+  one(form, "What we need from you, on the document, one a line", w, "docNeed", true);
+  one(form, "Spray and spread jobs also need, on the document", w, "docAir", true);
+  one(form, "Terms, on the document, one a line", w, "docTerms", true);
+  btn(form, "Reset the wording", "ghost", function(){
+    if(!confirm("Put all this wording back as it first was?")) return;
+    qc.words = clone(PRICES.WORDING);
+    saveIt();
+    rerender();
+  });
+}
+
 /* ─────────── spreadsheets. Column names match the owner's CRM tabs where the same thing is meant ─────────── */
 function csvOf(rows){ return "﻿" + rows.map(function(r){ return r.map(csvCell).join(","); }).join("\r\n") + "\r\n"; }
 function csvClients(){
@@ -3244,8 +4194,9 @@ function csvClients(){
 function csvQuotes(){
   var rows = [["Quote Number","Date Quoted","Property / Business Name","Contact Name","Email","Phone","Location","Subtotal ($ ex GST)","GST on","GST rate (%)","GST ($)","Total ($)","Status","Notes"]];
   S.quotes.forEach(function(q){
-    var t = C.quoteTotals(q.lines, q.gstOn, q.gstRate);
-    rows.push([q.number, q.date, q.clientName, q.contact, q.email, csvPhone(q.phone), q.location, plain(t.subtotal), q.gstOn ? "Yes" : "No", q.gstOn ? q.gstRate : "", plain(t.gst), plain(t.total), q.status, q.notes]);
+    var t = C.quoteTotals(q.lines, q.gstOn, q.gstRate), nope = "Can't be read";
+    var stuck = !!q.job && quoteUnreadable(q, priceOf(q), t).length > 0;
+    rows.push([q.number, q.date, q.clientName, q.contact, q.email, csvPhone(q.phone), q.location, stuck ? nope : plain(t.subtotal), q.gstOn ? "Yes" : "No", q.gstOn ? q.gstRate : "", stuck ? nope : plain(t.gst), stuck ? nope : q.job && q.poa ? "P.O.A." : plain(t.total), q.status, q.notes]);
   });
   return csvOf(rows);
 }
@@ -3337,8 +4288,14 @@ function rowStamp(x){
   /* the old Spray Log never wrote updatedAt, but its records carry their own dates */
   return x.updatedAt || Math.max(Date.parse(x.updated || "") || 0, Date.parse(x.amendedAt || "") || 0, Date.parse(x.finishedAt || "") || 0);
 }
+function hasOwnRates(c){ return !!c.rates && !sameData(c.rates, PRICES.DEFAULTS); }
+function hasOwnWording(c){
+  var qc = c.quote || {};
+  return !!String(qc.footer || "").trim() || (!!qc.words && !sameData(qc.words, PRICES.WORDING));
+}
+/* Resolves to anything the owner needs telling, or "". */
 function restoreMerge(d){
-  var next = {};
+  var next = {}, came = {};
   STORES.forEach(function(s){ next[s] = S[s].slice(); });
   STORES.forEach(function(s){
     if(s === "settings") return;
@@ -3346,18 +4303,53 @@ function restoreMerge(d){
       var i = next[s].map(function(x){ return x.id; }).indexOf(row.id);
       if(i < 0) next[s].push(row);
       else if(rowStamp(row) > rowStamp(next[s][i])) next[s][i] = row;
+      else return;
+      if(s === "quotes") came[row.id] = true;
     });
   });
   var theirs = (d.stores.settings || []).filter(function(x){ return x.id === "main"; })[0];
+  var mine = clone(cfg()), keptRates = false, keptWording = false, cardMoved = false;
   if(theirs){
-    var mine = clone(cfg());
     mine.business = mine.business || {};
     Object.keys(theirs.business || {}).forEach(function(k){ if(!mine.business[k]) mine.business[k] = theirs.business[k]; });
     mine.labelNos = Object.assign({}, theirs.labelNos || {}, mine.labelNos || {});
     if(mine.pdfLicences === undefined && theirs.pdfLicences !== undefined) mine.pdfLicences = theirs.pdfLicences;
+    /* A phone with no rates or wording of its own takes the backup's. One with its own keeps them. */
+    if(theirs.rates){
+      if(hasOwnRates(mine)) keptRates = !sameData(mine.rates, theirs.rates);
+      else {
+        cardMoved = !sameData(mine.rates || PRICES.DEFAULTS, theirs.rates);
+        mine.rates = clone(theirs.rates);
+        if(theirs.ratesFrom) mine.ratesFrom = theirs.ratesFrom; else delete mine.ratesFrom;
+      }
+    }
+    var tq = theirs.quote || {}, theirFooter = String(tq.footer || "").trim();
+    if(tq.words || theirFooter){
+      if(hasOwnWording(mine)){
+        var mq = mine.quote;
+        keptWording = (!!tq.words && !sameData(tq.words, mq.words || PRICES.WORDING)) || (!!theirFooter && theirFooter !== String(mq.footer || "").trim());
+      } else {
+        mine.quote = Object.assign(freshQuoteCfg(), mine.quote || {});
+        if(tq.words) mine.quote.words = clone(tq.words);
+        if(theirFooter) mine.quote.footer = tq.footer;
+      }
+    }
     next.settings = next.settings.filter(function(x){ return x.id !== "main"; }).concat([mine]);
   }
-  return writeAll(next);
+  /* A draft moves to the phone's rates when it opens. One that just came in, or one whose phone just
+     took new rates, would move to prices nobody picked, so it stays put until the owner says. */
+  var card = mine.rates || rateCard(), held = 0;
+  next.quotes = next.quotes.map(function(q){
+    if(!q.job || q.status !== "Draft" || q.ratesHeld || !(came[q.id] || cardMoved) || sameData(q.job.card, card)) return q;
+    var keep = clone(q);
+    keep.ratesHeld = true;
+    held++;
+    return keep;
+  });
+  var say = [];
+  if(keptRates || keptWording) say.push("This phone has its own " + (keptRates && keptWording ? "rates and wording" : keptRates ? "rates" : "quote wording") + ", so it kept them and the backup's weren't brought across.");
+  if(held) say.push((held === 1 ? "1 draft keeps the rates it was made with" : held + " drafts keep the rates they were made with") + ". Open one to move it to this phone's rates.");
+  return writeAll(next).then(function(){ return say.join(" "); });
 }
 function undoRestore(){
   var pre = byId("settings", "preRestore");
@@ -3458,6 +4450,7 @@ function homeView(){
 
 /* ═════════════ BACKUP AND SETUP ═════════════ */
 var restoreDraft = null;
+var mergeSaid = "";
 function setupView(){
   setTitle("Backup and setup");
   var sec = add(app, "section");
@@ -3501,13 +4494,22 @@ function setupView(){
   });
   btn(bk, "Open a backup file", "ghost", function(){ pick.click(); });
   add(bk, "p", "msg-bad").id = "restoreMsg";
+  if(mergeSaid){
+    note(bk, "", "Merged.", mergeSaid).dataset.out = "mergeSaid";
+    mergeSaid = "";
+  }
   if(restoreDraft){
     var d = restoreDraft, s = d.stores;
     function n(k){ return (s[k] || []).length; }
     var sum = note(bk, "good", d.importOnly ? "This import holds" : "This file holds", howMany(n("clients"), "client") + ", " + howMany(n("paddocks"), "site") + ", " + howMany(n("quotes"), "quote") + ", " + howMany(n("jobs"), "job") + ", " + howMany(n("records"), "spray record") + ", " + howMany(n("recipes"), "saved mix").replace("mixs", "mixes") + " and " + howMany(n("items"), "saved line") + ".");
     sum.dataset.out = "restoreSummary";
     btn(bk, "Merge: add these, newest copy of each wins", "", function(){
-      restoreMerge(d).then(function(){ restoreDraft = null; toast("Merged."); rerender(); }, restoreFailed);
+      restoreMerge(d).then(function(said){
+        restoreDraft = null;
+        mergeSaid = said;
+        toast(said ? "Merged. " + said : "Merged.");
+        rerender();
+      }, restoreFailed);
     });
     /* an import or an old Spray Log file only holds part of the picture, so it can't replace what's here */
     if(!d.importOnly && d.app === "stel-field"){
@@ -3529,14 +4531,14 @@ function setupView(){
   function restoreFailed(){ toast("Couldn't restore that. Nothing on this phone was changed."); rerender(); }
 
   var biz = foldForm(sec, "Your business", !c.business.name);
-  add(biz, "p", "hint", "This goes on your quotes and spray records. It stays on this phone.");
+  add(biz, "p", "hint", "This goes on your quotes and spray records. It stays on this phone. A box left blank here prints the price list's wording on a quote off the price list, and stays blank on typed quotes and spray records.");
   fld(biz, "Trading name", input(c.business, "name", {on: saveBiz}));
   fld(biz, "ABN", input(c.business, "abn", {on: saveBiz}));
   fld(biz, "Address", input(c.business, "address", {area: true, on: saveBiz}));
   var r = add(biz, "div", "two");
   fld(r, "Phone", input(c.business, "phone", {type: "tel", on: saveBiz}));
   fld(r, "Email", input(c.business, "email", {type: "email", on: saveBiz}));
-  fld(biz, "Terms or licence line for the bottom of each quote", input(qc, "footer", {area: true, on: saveBiz}));
+  fld(biz, "Terms or licence line for the bottom of a quote you type yourself", input(qc, "footer", {area: true, on: saveBiz}), "A quote off the price list prints the licence line under Quote wording and sign off instead.");
 
   var ppl = fold(sec, "Pilots (" + S.people.length + ")", !S.people.length);
   if(S.people.length){
@@ -3567,14 +4569,17 @@ function setupView(){
   }
   btn(lic, "Add a licence", "ghost", function(){ licenceView({kind: LICENCE_KINDS[0]}); });
 
+  ratesForm(foldForm(sec, "Your rates. Edit any of them", false));
+  wordingForm(foldForm(sec, "Quote wording and sign off", false));
+
   var qf = foldForm(sec, "Quotes: GST, numbers and saved lines", false);
   add(qf, "span", "f-l", "GST on new quotes");
   chipRow(qf, [["on","GST on"],["off","GST off"]], qc.gstOn ? "on" : "off", function(v){ qc.gstOn = v === "on"; saveBiz(); rerender(); });
   var r2 = add(qf, "div", "two");
-  fld(r2, "GST rate, %", input(qc, "gstRate", {num: true, on: saveBiz}));
+  fld(r2, "GST rate, %", input(qc, "gstRate", {num: true, strict: true, need: true, on: saveBiz}));
   fld(r2, "Numbers start with", input(qc, "prefix", {on: saveBiz}));
   add(qf, "h3", null, "Saved lines");
-  if(!S.items.length) add(qf, "p", "hint", "None yet. No prices are built in. Add your own here, or tap Keep for reuse on a quote line.");
+  if(!S.items.length) add(qf, "p", "hint", "None yet. Add your own here, or tap Keep for reuse on a quote line.");
   S.items.slice().sort(function(a, b){ return (a.desc || "").localeCompare(b.desc || ""); }).forEach(function(it){
     var card = add(qf, "div", "prod");
     function saveIt(){ put("items", it).catch(function(){}); }
@@ -3639,7 +4644,7 @@ function showOfflineState(){
 }
 function checkOffline(){
   if(!self.caches || !navigator.serviceWorker){ offlineState = "no"; showOfflineState(); return; }
-  Promise.all(["index.html","calc.js","app.js","data/products.json"].map(function(f){
+  Promise.all(["index.html","calc.js","rates.js","logo.js","app.js","data/products.json"].map(function(f){
     return caches.match(new URL(f, location.href).href);
   })).then(function(hits){
     offlineState = hits.every(Boolean) ? "ready" : "no";

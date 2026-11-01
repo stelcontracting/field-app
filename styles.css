@@ -301,5 +301,77 @@ h2.sec{font-size:20px;font-weight:800;letter-spacing:0;text-transform:none;color
   .mast,.tabs,.toast,.back,.no-print{display:none !important}
   .wrap{padding:0;max-width:none}
 }
+/* priced quotes */
+.q-app{margin:0;font-size:20px;font-weight:800}
+.q-basis{font-size:15px;font-weight:800;letter-spacing:.03em}
+.q-lines{border:3px solid var(--rule);border-radius:8px;padding:0 12px}
+.q-line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:10px 0;border-bottom:1px solid var(--rule)}
+.q-line:last-child{border-bottom:0}
+.q-line-d{font-weight:800;overflow-wrap:anywhere}
+.q-line-c{display:block;font-weight:500;font-size:15px;color:var(--ink-soft);margin-top:2px}
+.q-line-a{font-weight:800;white-space:nowrap}
+.q-flag{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border:3px solid var(--accent-edge);border-radius:8px;background:var(--accent-soft);font-size:16px;font-weight:600;overflow-wrap:anywhere}
+.q-flag.warn{border-color:var(--warn-edge);background:var(--warn-soft)}
+.q-flag-t{font-size:13px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}
+.f.override input{border:3px solid var(--warn-edge)}
+.q-text{margin:0;padding:12px;border:3px solid var(--rule);border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.4}
+.pipe-cols{display:flex;flex-direction:column}
+.pipe-cols > div{display:flex;flex-direction:column;padding:8px 0;border-bottom:1px solid var(--rule);overflow-wrap:anywhere}
+.pipe-k{font-size:13px;font-weight:800;color:var(--ink-soft)}
+.qdoc{background:#fff;color:#111;padding:14px;border:1px solid #bbb;border-radius:8px;font-size:15px;line-height:1.45;overflow-wrap:anywhere}
+.qd-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.qd-title{font-size:30px;font-weight:800;line-height:1.1}
+.qd-logo{width:42%;max-width:180px;height:auto;flex:0 0 auto}
+.qd-parties{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px 24px;margin-top:16px}
+.qd-party{flex:1 1 140px;min-width:0}
+.qd-party.right{text-align:right}
+.qd-lbl{font-weight:800}
+.qd-figs{display:flex;flex-wrap:wrap;gap:12px 22px;margin-top:16px}
+.qd-fig .k{font-size:13px;color:#555}
+.qd-fig .v{font-size:17px;font-weight:800}
+.qd-fig.big .v{font-size:24px}
+.qd-rule{height:0;border-top:3px solid #262261;margin:12px 0 0}
+.qdoc .tblw{margin:0;padding:0}
+table.qd-items{width:100%;border-collapse:collapse;font-size:14px;margin-top:4px}
+.qd-items th{text-align:right;font-size:12px;color:#555;padding:8px 4px;border-bottom:1px solid #bbb}
+.qd-items td{text-align:right;vertical-align:top;padding:8px 4px;border-bottom:1px solid #e2e2e2}
+.qd-items th:first-child,.qd-items td:first-child{text-align:left;min-width:120px}
+.totals .grand span:last-child{white-space:nowrap}
+.qd-items th{white-space:nowrap;overflow-wrap:normal}
+@media screen and (max-width:480px){
+  table.qd-items{font-size:13px}
+  .qd-items th:nth-child(4),.qd-items td:nth-child(4){display:none}
+  .qd-items th,.qd-items td{padding:8px 3px}
+  .qd-items th:first-child,.qd-items td:first-child{min-width:0}
+}
+.qd-sub{display:block;color:#555;font-size:13px;margin-top:2px}
+.qd-num{white-space:nowrap}
+.qd-totals{display:flex;justify-content:flex-end;margin-top:10px}
+.qd-totals td{padding:4px 6px;text-align:right}
+.qd-totals td:first-child{text-align:left;color:#555}
+.qd-totals .grand td{border-top:1px solid #bbb;font-weight:800;font-size:18px;color:#111}
+.qd-totals .dep td{font-weight:700;color:#262261}
+.qd-poa{margin-top:12px;padding:12px;border:2px solid #5C3F00;background:#FFE9A8}
+.qd-poa b{display:block;margin-bottom:4px}
+.qd-poa ul{margin:6px 0 0;padding-left:18px}
+.qd-gap{margin-top:8px}
+.qd-notes{margin:12px 0 0}
+.qd-cols{display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:16px}
+.qd-col{flex:1 1 200px;min-width:0}
+.qd-col ul{margin:0;padding-left:16px;font-size:14px}
+.qd-col li{margin-bottom:3px}
+.qd-h{font-size:13px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#262261;margin-bottom:4px}
+.qd-lic{margin-top:14px;padding-top:8px;border-top:1px solid #ddd;font-size:14px}
+.qd-lic b{color:#262261}
+.qd-sign{margin-top:14px}
+@media print{
+  .qdoc{border:0;padding:0;font-size:10pt}
+  .qd-title{font-size:20pt}
+  .qd-logo{width:48mm;max-width:none}
+  .qd-fig .v{font-size:12pt}
+  .qd-fig.big .v{font-size:15pt}
+  .qd-items,.qd-col ul,.qd-lic{font-size:9pt}
+  .qd-cols{page-break-inside:avoid}
+}
 .toast{pointer-events:none}
 button,input,select,textarea{font-family:inherit}
