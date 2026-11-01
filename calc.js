@@ -96,7 +96,7 @@
   var ACRE_IN_HA = parse("0.40468564224");  /* international acre: 4046.8564224 m2, exact */
   var AREA_UNITS = {
     ha: { label: "ha", toHa: R(1) },
-    ac: { label: "acres", toHa: ACRE_IN_HA },
+    ac: { label: "acres", toHa: ACRE_IN_HA },  /* metric only now: this just reads what was saved in acres before */
     m2: { label: "m²", toHa: R(1n, 10000n) }
   };
   var SPRAY_RATE_UNITS = {
@@ -153,7 +153,7 @@
     if (!v || !u) return "";
     var ha = mul(v, u.toHa);
     var typed = unrounded(v) + " " + u.label;
-    if (unit === "ha") return typed + " (" + show(mul(ha, R(10000)), 3) + " m², " + show(div(ha, ACRE_IN_HA), 3) + " acres)";
+    if (unit === "ha") return typed + " (" + show(mul(ha, R(10000)), 3) + " m²)";
     return typed + " = " + show(ha, 6) + " ha";
   }
 

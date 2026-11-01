@@ -2904,13 +2904,20 @@ function sessionsBlock(f, rec, changed, final){
   });
 }
 function weatherName(w){ return (w.stage === "Change" ? "Change during" : w.stage) + (w.date ? " " + fmtDate(w.date) : ""); }
-/* Area and spray can be entered in other units, and the record keeps ha and L/ha */
+/* Area and spray can be entered in m² and L/1000 m² too, and the record keeps ha and L/ha */
 function areaSprayFields(form, rec, on){
   rec.areaUnit = rec.areaUnit || "ha";
   rec.sprayUnit = rec.sprayUnit || "L/ha";
   /* set from a paddock or the job since it was typed, so the figure stands and the old typing goes */
   if(rec.areaUnit !== "ha" && rec.area !== rec.areaWorked) rec.areaUnit = "ha";
   if(rec.sprayUnit !== "L/ha" && rec.waterRate !== rec.sprayWorked) rec.sprayUnit = "L/ha";
+  /* a draft typed in acres, from before the app went metric, becomes the same area in hectares.
+     A finished record stays as it was written, unless it's opened up to amend. */
+  if(rec.areaUnit === "ac" && rec.status !== "final"){
+    var ac = C.parse(cleanNum(rec.areaTyped));
+    if(ac) rec.area = C.unrounded(C.mul(ac, C.AREA_UNITS.ac.toHa), 40);
+    rec.areaUnit = "ha";
+  }
   if(rec.areaUnit === "ha") rec.areaTyped = rec.area;
   if(rec.sprayUnit === "L/ha") rec.sprayTyped = rec.waterRate;
   var eA = null, eS = null;
@@ -2932,7 +2939,7 @@ function areaSprayFields(form, rec, on){
   }
   fld(form, "Area treated", input(rec, "areaTyped", {num: true, on: function(){ work(); on(); }}));
   var ch = add(form, "div", "edit-only");
-  unitPick(ch, "Area unit", rec, "areaUnit", [["ha","ha"],["ac","acres"],["m2","m²"]], function(){ work(); on(); rerender(); });
+  unitPick(ch, "Area unit", rec, "areaUnit", [["ha","ha"],["m2","m²"]], function(){ work(); on(); rerender(); });
   eA = add(form, "p", "echo");
   fld(form, "Spray rate", input(rec, "sprayTyped", {num: true, on: function(){ work(); on(); }}));
   var ch2 = add(form, "div", "edit-only");
@@ -3396,7 +3403,7 @@ function typedLines(host, q, save, refresh){
   });
   var dl = add(host, "datalist");
   dl.id = "unitList";
-  ["ha","acre","hour","km","each","job"].forEach(function(u){ add(dl, "option").value = u; });
+  ["ha","hour","km","each","job"].forEach(function(u){ add(dl, "option").value = u; });
   btn(host, "Add a line", "ghost", function(){ q.lines.push(blankLine()); save(); rerender(); });
   if(S.items.length){
     var pick = {v: ""};
