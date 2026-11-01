@@ -2654,7 +2654,11 @@ function clientBox(form, d, after, typing){
   var w = fld(form, "Client", inp, "Pick one, or type a new name and keep going. Add their details later.");
   var dl = add(w, "datalist");
   dl.id = "clientNames";
-  sortedClients().forEach(function(c){ add(dl, "option").value = c.name; });
+  sortedClients().forEach(function(c){
+    var o = add(dl, "option");
+    o.value = c.name;
+    if(isPotential(c)) o.label = "Pipeline";
+  });
   var which = add(form, "div");
   /* a name typed in passing and then changed doesn't stay behind as a client */
   function dropQuick(cur, keepId){ if(cur && cur.quick && cur.id !== keepId && !clientInUse(cur, d)) del("clients", cur.id).catch(function(){}); }
@@ -2678,6 +2682,8 @@ function clientBox(form, d, after, typing){
     /* a slip in a name just typed fixes that client rather than making a second one */
     if(cur && cur.quick && !clientInUse(cur, d)){ cur.name = name; d.clientName = name; put("clients", cur).catch(function(){}); after(cur); return; }
     var fresh = {name: name, quick: true, created: nowStamp()};
+    /* someone new on a quote hasn't said yes yet, so they start in the pipeline */
+    if(d.lines) fresh.stage = "potential";
     put("clients", fresh).catch(function(){});
     d.clientId = fresh.id;
     d.clientName = name;
@@ -2753,33 +2759,67 @@ function jobView(job){
 }
 
 /* ═════════════ CLIENTS ═════════════ */
+/* A potential client is a client with stage "potential", so quotes and jobs can pick them like anyone
+   else. Their extra fields are the columns of the CRM's Pipeline tab, with its status and service lists. */
+var clientPane = "clients";
+var PIPE_STATUS = ["Quoted","Follow up","No response","Won","Lost"];
+var PIPE_SERVICES = ["Spraying","Spreading","Pelleting","Seeding","Mapping","Baiting","Inspection","Survey","Thermal"];
+function isPotential(c){ return c.stage === "potential"; }
+function latestQuote(c){
+  return S.quotes.filter(function(q){ return q.clientId === c.id; }).sort(function(a, b){ return (a.date || "") < (b.date || "") ? 1 : -1; })[0] || null;
+}
+/* their own status if one's been set, otherwise what their latest quote is up to */
+function pipeShown(c){
+  if(c.pipeStatus) return c.pipeStatus;
+  var q = latestQuote(c);
+  return q ? (q.status === "Draft" ? "Draft quote" : q.status) : "New";
+}
+/* who to chase next comes first, and anyone won or lost goes to the bottom */
+function pipeOrder(a, b){
+  function closed(c){ var s = pipeShown(c); return s === "Won" || s === "Lost" ? 1 : 0; }
+  return closed(a) - closed(b) || (a.followUp || "9").localeCompare(b.followUp || "9") || (a.name || "").localeCompare(b.name || "");
+}
+function pipeBits(c){
+  var q = latestQuote(c), s = pipeShown(c), open = s !== "Won" && s !== "Lost", days = c.followUp ? daysFromToday(c.followUp) : null;
+  return [
+    {t: s, k: s === "Won" ? "good" : ""},
+    c.followUp && open ? {t: "Follow up " + fmtDate(c.followUp), k: days < 0 ? "stop" : days === 0 ? "warn" : ""} : null,
+    c.contact || null, c.phone || null, c.pipeService || null,
+    q ? q.number : null,
+    S.jobs.some(function(j){ return j.clientId === c.id; }) ? "Has a job" : null
+  ];
+}
 function paddocksView(){
   setTitle("Clients");
   var sec = add(app, "section");
-  btn(sec, "New client", "", function(){ clientView({}); });
-  if(!S.clients.length){
-    add(sec, "div", "panel").appendChild(el("div", "empty", "No clients yet. Add one, then add their paddocks or sites."));
+  var pipeline = clientPane === "pipeline", potential = S.clients.filter(isPotential).length;
+  chipRow(sec, [["clients", "Clients (" + (S.clients.length - potential) + ")"], ["pipeline", "Pipeline (" + potential + ")"]], clientPane, function(v){ clientPane = v; rerender(); });
+  btn(sec, pipeline ? "New potential client" : "New client", "", function(){ clientView(pipeline ? {stage: "potential"} : {}); });
+  var pool = sortedClients().filter(function(c){ return isPotential(c) === pipeline; });
+  if(pipeline) pool.sort(pipeOrder);
+  if(!pool.length){
+    add(sec, "div", "panel").appendChild(el("div", "empty", pipeline ? "No one in the pipeline yet. Add a potential client here, or type a new name on a quote." : "No clients yet. Add one, then add their paddocks or sites."));
     return;
   }
   var state = {q: ""}, s = add(sec, "div", "search");
-  var box = input(state, "q", {ph: "Search clients", on: draw});
-  box.setAttribute("aria-label", "Search clients");
+  var box = input(state, "q", {ph: pipeline ? "Search the pipeline" : "Search clients", on: draw});
+  box.setAttribute("aria-label", pipeline ? "Search the pipeline" : "Search clients");
   s.appendChild(box);
   var out = add(sec, "div");
   function draw(){
     out.textContent = "";
     var words = state.q.toLowerCase().split(/\s+/).filter(Boolean);
-    var rows = sortedClients().filter(function(c){
+    var rows = pool.filter(function(c){
       var pads = S.paddocks.filter(function(p){ return p.clientId === c.id; });
-      var hay = [c.name, c.contact, c.property, c.phone, c.email, c.address, c.notes].concat(pads.map(function(p){ return [p.name, p.address, p.locality].join(" "); })).join(" ").toLowerCase();
+      var hay = [c.name, c.contact, c.property, c.phone, c.email, c.address, c.notes, c.pipeService, pipeline ? pipeShown(c) : ""].concat(pads.map(function(p){ return [p.name, p.address, p.locality].join(" "); })).join(" ").toLowerCase();
       return words.every(function(w){ return hay.indexOf(w) >= 0; });
     });
-    if(!rows.length){ add(out, "div", "panel").appendChild(el("div", "empty", "No client matches that.")); return; }
+    if(!rows.length){ add(out, "div", "panel").appendChild(el("div", "empty", pipeline ? "No one in the pipeline matches that." : "No client matches that.")); return; }
     var list = listPanel(out);
     rows.forEach(function(c){
       var pads = S.paddocks.filter(function(p){ return p.clientId === c.id; });
       var ha = pads.reduce(function(t, p){ return t + (num(p.ha) || 0); }, 0);
-      rowItem(list, c.name, [
+      rowItem(list, c.name, pipeline ? pipeBits(c) : [
         c.contact || null, c.phone || null,
         pads.length ? fmtN(pads.length, 0) + (pads.length === 1 ? " site" : " sites") : null,
         ha ? fmtN(ha, 2) + " ha" : null
@@ -2788,10 +2828,32 @@ function paddocksView(){
   }
   draw();
 }
+/* a pick list that keeps whatever the CRM already holds, even if it's not on the list */
+function pipeList(blank, list, now){
+  var all = now && list.indexOf(now) < 0 ? list.concat([now]) : list;
+  return [["", blank]].concat(all.map(function(x){ return [x, x]; }));
+}
+function pipelineFields(f, d){
+  var closedBox = input(d, "pipeClosed", {type: "date"});
+  var r = add(f, "div", "two");
+  fld(r, "Status", select(d, "pipeStatus", pipeList(latestQuote(d) ? "Same as their quote" : "New", PIPE_STATUS, d.pipeStatus), {on: function(v){
+    if((v === "Won" || v === "Lost") && !d.pipeClosed){ d.pipeClosed = todayISO(); closedBox.value = d.pipeClosed; }
+  }}));
+  fld(r, "Follow up", input(d, "followUp", {type: "date"}));
+  var r2 = add(f, "div", "two");
+  fld(r2, "Service", select(d, "pipeService", pipeList("Not sure yet", PIPE_SERVICES, d.pipeService)));
+  fld(r2, "Area, ha", input(d, "pipeArea", {num: true}));
+  var more = add(fold(f, "Date quoted, value, won or lost", !!(d.quotedOn || d.pipeValue || d.pipeClosed || d.pipeReason)), "div", "form inner");
+  var r3 = add(more, "div", "two");
+  fld(r3, "Date quoted", input(d, "quotedOn", {type: "date"}));
+  fld(r3, "Value, $ ex GST", input(d, "pipeValue", {num: true}));
+  fld(more, "Date won or lost", closedBox);
+  fld(more, "Reason if lost", input(d, "pipeReason"));
+}
 function clientView(client, picked){
   if(client) delete client.quick;
   editView({
-    title: "Client", store: "clients", item: client,
+    title: client && isPotential(client) ? "Potential client" : "Client", store: "clients", item: client,
     valid: function(d){ return !!(d.name || "").trim(); },
     invalid: "Enter the client's name first.",
     after: function(d){ if(picked) picked(d); },
@@ -2806,6 +2868,7 @@ function clientView(client, picked){
         if(d.phone){ var a = add(acts, "a", "btn ghost small", "Call"); a.href = "tel:" + d.phone.replace(/[^\d+]/g, ""); }
         if(d.email){ var e = add(acts, "a", "btn ghost small", "Email"); e.href = "mailto:" + d.email; }
       }
+      if(isPotential(d)) pipelineFields(f, d);
       fld(f, "Notes", input(d, "notes", {area: true}));
       var more = add(fold(f, "Property and postal address", !!(d.property || d.address)), "div", "form inner");
       fld(more, "Property name", input(d, "property"));
@@ -2829,6 +2892,28 @@ function clientView(client, picked){
         j.clientId = d.id;
         jobView(j);
       });
+      if(isPotential(d)){
+        btn(sec, "Won: make them a client", "ghost", function(){
+          if(!(d.name || "").trim()){ toast("Enter the client's name first."); return; }
+          delete d.stage;
+          d.pipeStatus = "Won";
+          if(!d.pipeClosed) d.pipeClosed = todayISO();
+          ensure();
+          toast("Moved to Clients.");
+          back();
+        });
+      } else if(byId("clients", d.id)){
+        var mv = add(sec, "button", "linkbtn", "Not a client yet? Move them to the pipeline");
+        mv.type = "button";
+        mv.addEventListener("click", function(){
+          d.stage = "potential";
+          delete d.pipeStatus;
+          delete d.pipeClosed;
+          if(!ensure()) return;
+          toast("Moved to the pipeline.");
+          back();
+        });
+      }
     },
     keep: function(d){
       if(S.paddocks.some(function(p){ return p.clientId === d.id; })) return "Delete this client's sites first.";
@@ -4197,11 +4282,12 @@ function wordingForm(form){
 /* ─────────── spreadsheets. Column names match the owner's CRM tabs where the same thing is meant ─────────── */
 function csvOf(rows){ return "﻿" + rows.map(function(r){ return r.map(csvCell).join(","); }).join("\r\n") + "\r\n"; }
 function csvClients(){
-  var rows = [["Property / Business Name","Contact Name","Phone","Email","Property","Address","Site","Location","Area (ha)","Lot and plan","Notes"]];
+  var rows = [["Property / Business Name","Contact Name","Phone","Email","Property","Address","Site","Location","Area (ha)","Lot and plan","Notes","Stage","Status","Service Quoted","Follow Up Date","Reason if Lost"]];
   sortedClients().forEach(function(c){
     var pads = S.paddocks.filter(function(p){ return p.clientId === c.id; });
     (pads.length ? pads : [{}]).forEach(function(p){
-      rows.push([c.name, c.contact, csvPhone(c.phone), c.email, c.property, c.address, p.name, p.address || p.locality, p.ha, p.lot, c.notes]);
+      rows.push([c.name, c.contact, csvPhone(c.phone), c.email, c.property, c.address, p.name, p.address || p.locality, p.ha, p.lot, c.notes,
+        isPotential(c) ? "Pipeline" : "Client", c.pipeStatus, c.pipeService, c.followUp, c.pipeReason]);
     });
   });
   return csvOf(rows);
