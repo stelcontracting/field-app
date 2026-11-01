@@ -2731,7 +2731,7 @@ function jobView(job){
       var gaps = noHaNames(jobPaddocks(d));
       if(gaps.length) note(sec, "", "No hectares:", gaps.join(", ") + ". The job's total leaves this out until it has an area.");
       btn(sec, "1. Work out the mix", "", function(){ if(ensure()) openMixFor(d); });
-      btn(sec, "2. Spray record", "", function(){ if(ensure()) openRecordFor(d); });
+      btn(sec, "2. Spray record", "ghost", function(){ if(ensure()) openRecordFor(d); });
       var box = add(fold(sec, "Forecast (needs internet)", false), "div", "panel");
       forecastBox(add(box, "div", "form"), function(){
         var p = jobPaddocks(d)[0];
@@ -3646,7 +3646,7 @@ function quoteSheet(q){
     btn(a3, "Start a job", "ghost", function(){ jobFromQuote(q); });
     if(!b.name && !b.abn) note(ctl, "", "Your business name and ABN aren't on this quote yet.", "Add them under Backup and setup.");
 
-    var sheet = add(sec, "div", "sheet");
+    var sheet = add(sec, "div", "sheet paper");
     if(b.name) add(sheet, "h2", null, b.name);
     if(b.abn) add(sheet, "div", null, "ABN " + b.abn);
     [b.address, b.phone, b.email].filter(Boolean).forEach(function(x){ add(sheet, "div", null, x); });
@@ -4104,7 +4104,7 @@ function pricedSheet(q){
     var pw = add(add(pf, "div", "panel"), "div", "form");
     add(pw, "p", "hint", "Open the CRM workbook, click the Pipeline tab, click the first empty cell in column A, paste. It fills all thirteen columns.");
     var cells = stuck.length ? [] : pipeCells(q);
-    var pc = btn(pw, "Copy pipeline row", "", function(){ copyText(cells.join("\t"), function(){ toast("Copied, now paste." + markGone(q, st)); }); });
+    var pc = btn(pw, "Copy pipeline row", "ghost", function(){ copyText(cells.join("\t"), function(){ toast("Copied, now paste." + markGone(q, st)); }); });
     if(stuck.length){
       [sh, cp, pd, pr, cs, pc].forEach(function(b){ b.disabled = true; });
       return;
@@ -4423,14 +4423,10 @@ function homeView(){
   banners(sec);
   var hero = btn(sec, "Mix calculator", "hero", function(){ setTab("mix"); });
   hero.dataset.go = "mix";
-  var g = add(sec, "div", "tiles");
+  var g = add(sec, "div", "btns");
   btn(g, "New job", "ghost", function(){ jobView(newJobItem()); });
   btn(g, "New quote", "ghost", function(){ quoteView(newQuoteItem()); });
-  btn(g, "Clients (" + S.clients.length + ")", "ghost", function(){ setTab("clients"); });
-  btn(g, "Quotes (" + S.quotes.length + ")", "ghost", function(){ setTab("quotes"); });
-  btn(g, "Jobs (" + S.jobs.length + ")", "ghost", function(){ setTab("jobs"); });
-  btn(g, "Spray records (" + S.records.length + ")", "ghost", function(){ setTab("records"); });
-  var open = S.jobs.filter(function(j){ return j.status === "planned" || j.status === "booked"; }).sort(function(a, b){
+  var open =S.jobs.filter(function(j){ return j.status === "planned" || j.status === "booked"; }).sort(function(a, b){
     if(!a.due) return 1;
     if(!b.due) return -1;
     return a.due < b.due ? -1 : 1;
@@ -4445,7 +4441,9 @@ function homeView(){
       ], function(){ jobView(j); });
     });
   }
-  btn(sec, "Backup and setup", "ghost", function(){ setTab("setup"); });
+  var more = listPanel(sec);
+  rowItem(more, "Spray records", [howMany(S.records.length, "record")], function(){ setTab("records"); });
+  rowItem(more, "Backup and setup", [], function(){ setTab("setup"); });
 }
 
 /* ═════════════ BACKUP AND SETUP ═════════════ */
@@ -4666,6 +4664,7 @@ function startServiceWorker(){
 /* ─────────── start up ─────────── */
 function applyTheme(){ document.documentElement.setAttribute("data-theme", ls(LS_THEME, "light")); }
 applyTheme();
+document.getElementById("mastLogo").src = self.STEL_LOGO;
 
 ROOTS = {home: homeView, mix: mixView, clients: paddocksView, quotes: quotesView, jobs: jobsView, records: recordsView, setup: setupView};
 
