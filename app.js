@@ -333,11 +333,13 @@ function put(store, obj){
   if(at < 0) list.push(obj); else list[at] = obj;
   var stamp = obj.updatedAt = nextStamp();
   journal(store, obj);
+  if(store === "clients" || store === "quotes") crmChanged();
   return write(store, function(os){ os.put(obj); }).then(function(){ unjournal(store, obj, stamp); });
 }
 function del(store, id){
   try { localStorage.removeItem(journalKey(store, id)); } catch(e){}
   S[store] = S[store].filter(function(x){ return x.id !== id; });
+  if(store === "clients") crmChanged();
   return write(store, function(os){ os.delete(id); });
 }
 function cfg(){
@@ -392,7 +394,7 @@ function setTab(name){
   if(depth > 0){ skipPop = true; history.go(-depth); }
   curTab = name;
   stack = [{fn: ROOTS[name], y: 0}];
-  var lit = name === "records" ? "jobs" : name === "setup" ? "home" : name;
+  var lit = name === "records" ? "jobs" : name === "setup" || name === "sync" ? "home" : name;
   document.querySelectorAll(".tab").forEach(function(b){
     if(b.getAttribute("data-tab") === lit) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
@@ -421,6 +423,7 @@ window.addEventListener("storage", function(e){
 document.addEventListener("visibilitychange", function(){
   if(document.visibilityState === "hidden"){ if(hideHook) hideHook(); }
   else if(stack.length && ls(LS_WRITE, "") !== lastWrite) otherWindowChanged();
+  if(document.visibilityState === "visible") crmWake();
 });
 window.addEventListener("pagehide", function(){ if(hideHook) hideHook(); });
 function backBtn(){
@@ -2811,7 +2814,7 @@ function paddocksView(){
     var words = state.q.toLowerCase().split(/\s+/).filter(Boolean);
     var rows = pool.filter(function(c){
       var pads = S.paddocks.filter(function(p){ return p.clientId === c.id; });
-      var hay = [c.name, c.contact, c.property, c.phone, c.email, c.address, c.notes, c.pipeService, pipeline ? pipeShown(c) : ""].concat(pads.map(function(p){ return [p.name, p.address, p.locality].join(" "); })).join(" ").toLowerCase();
+      var hay = [c.name, c.contact, c.property, c.phone, c.email, c.address, c.location, c.notes, c.pipeService, pipeline ? pipeShown(c) : ""].concat(pads.map(function(p){ return [p.name, p.address, p.locality].join(" "); })).join(" ").toLowerCase();
       return words.every(function(w){ return hay.indexOf(w) >= 0; });
     });
     if(!rows.length){ add(out, "div", "panel").appendChild(el("div", "empty", pipeline ? "No one in the pipeline matches that." : "No client matches that.")); return; }
@@ -2870,9 +2873,16 @@ function clientView(client, picked){
       }
       if(isPotential(d)) pipelineFields(f, d);
       fld(f, "Notes", input(d, "notes", {area: true}));
-      var more = add(fold(f, "Property and postal address", !!(d.property || d.address)), "div", "form inner");
+      var more = add(fold(f, "Property, location and postal address", !!(d.property || d.location || d.address)), "div", "form inner");
       fld(more, "Property name", input(d, "property"));
+      fld(more, "Location", input(d, "location"), "The Location column on the CRM's Clients tab.");
       fld(more, "Address", input(d, "address", {area: true}), "A spray record needs the landowner or occupier's address and phone.");
+      if(d.crmOff){
+        add(f, "p", "hint", "Kept on this phone only, so the CRM sync leaves them out.");
+        var linked = add(f, "button", "linkbtn", "Put them back in the CRM sync");
+        linked.type = "button";
+        linked.addEventListener("click", function(){ delete d.crmOff; rerender(); });
+      }
     },
     more: function(sec, d, ensure){
       add(sec, "h2", "sec", "Sites and paddocks");
@@ -4319,7 +4329,7 @@ function csvJobs(){
 }
 
 /* ═════════════ BACKUP AND RESTORE ═════════════ */
-function phoneOnly(x){ var i = String(x.id); return i === "route" || i === "preRestore" || i.indexOf("stash:") === 0; }
+function phoneOnly(x){ var i = String(x.id); return i === "route" || i === "preRestore" || i.indexOf("stash:") === 0 || i.indexOf("sync:") === 0; }
 function backupStores(){
   var out = {};
   STORES.forEach(function(s){
@@ -4544,6 +4554,7 @@ function homeView(){
   }
   var more = listPanel(sec);
   rowItem(more, "Spray records", [howMany(S.records.length, "record")], function(){ setTab("records"); });
+  rowItem(more, "CRM sync", crmHomeBits(), function(){ setTab("sync"); });
   rowItem(more, "Backup and setup", [], function(){ setTab("setup"); });
 }
 
@@ -4718,7 +4729,7 @@ function setupView(){
 
   var ab = fold(sec, "What needs internet, and where things come from", false);
   var cr = add(ab, "div", "credits");
-  cr.appendChild(document.createTextNode("With no internet: clients, quotes, jobs, the mix calculator, spray records, product search, saved mixes, backups, PDFs and spreadsheets all still work. Needs internet: map pictures you haven't already looked at, lot and plan lookups, forecasts, opening an approved label, sending anything, and getting app updates, which land by themselves next time you open it."));
+  cr.appendChild(document.createTextNode("With no internet: clients, quotes, jobs, the mix calculator, spray records, product search, saved mixes, backups, PDFs and spreadsheets all still work. Needs internet: map pictures you haven't already looked at, lot and plan lookups, forecasts, opening an approved label, sending anything, the CRM sync, and getting app updates, which land by themselves next time you open it."));
   add(cr, "br"); add(cr, "br");
   cr.appendChild(document.createTextNode("Product data from the APVMA PubCRIS open dataset, CC BY 3.0 AU"));
   var dataNote = add(cr, "span", "mono");
@@ -4743,7 +4754,7 @@ function showOfflineState(){
 }
 function checkOffline(){
   if(!self.caches || !navigator.serviceWorker){ offlineState = "no"; showOfflineState(); return; }
-  Promise.all(["index.html","calc.js","rates.js","logo.js","app.js","data/products.json"].map(function(f){
+  Promise.all(["index.html","calc.js","rates.js","logo.js","sync.js","app.js","data/products.json"].map(function(f){
     return caches.match(new URL(f, location.href).href);
   })).then(function(hits){
     offlineState = hits.every(Boolean) ? "ready" : "no";
@@ -4767,7 +4778,7 @@ function applyTheme(){ document.documentElement.setAttribute("data-theme", ls(LS
 applyTheme();
 document.getElementById("mastLogo").src = self.STEL_LOGO;
 
-ROOTS = {home: homeView, mix: mixView, clients: paddocksView, quotes: quotesView, jobs: jobsView, records: recordsView, setup: setupView};
+ROOTS = {home: homeView, mix: mixView, clients: paddocksView, quotes: quotesView, jobs: jobsView, records: recordsView, setup: setupView, sync: syncView};
 
 window.addEventListener("beforeinstallprompt", function(e){
   e.preventDefault();
@@ -4776,6 +4787,8 @@ window.addEventListener("beforeinstallprompt", function(e){
 });
 
 dbOpen().then(loadAll).then(function(){
+  /* coming back from Microsoft's sign-in page */
+  var signedIn = crmReturn();
   replayJournal();
   var oldUndo = byId("settings", "preRestore");
   if(oldUndo && Date.now() - (oldUndo.ms || 0) >= 86400000) del("settings", "preRestore").catch(function(){});
@@ -4784,8 +4797,12 @@ dbOpen().then(loadAll).then(function(){
   var r = readRoute();
   stack = [{fn: homeView, y: 0}];
   history.replaceState({d: 1}, "");
-  setTab(r && r.tab && ROOTS[r.tab] ? r.tab : "home");
-  if(r && r.k !== "tab") openRoute(r);
+  setTab(signedIn ? "sync" : r && r.tab && ROOTS[r.tab] ? r.tab : "home");
+  if(signedIn) signedIn.then(function(ok){ rerender(); if(ok) crmRun(); });
+  else {
+    if(r && r.k !== "tab") openRoute(r);
+    if(crmSignedIn()) crmSoon(1500);
+  }
   if(navigator.storage && navigator.storage.persist){
     navigator.storage.persist().then(function(v){ persisted = v; }, function(){});
   }

@@ -141,6 +141,8 @@ input::placeholder,textarea::placeholder{color:var(--ink-faint)}
 .note.good b{color:var(--accent)}
 .note .btn{margin-top:10px;background:var(--surface);color:var(--accent);border-color:var(--accent)}
 .note ul{margin:6px 0 0;padding-left:18px}
+.sync-was{margin-top:6px;white-space:pre-line}
+.sync-list{margin:0;padding-left:20px;font-size:15px;line-height:1.45;color:var(--ink-soft)}
 .note p{margin:8px 0 0}
 .big-stop{font-size:19px;line-height:1.25}
 

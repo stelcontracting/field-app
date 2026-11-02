@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- The browser refuses every connection except the few optional internet extras named here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://spatial-img.information.qld.gov.au; connect-src 'self' https://spatial-gis.information.qld.gov.au https://api.met.no; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https://spatial-img.information.qld.gov.au; connect-src 'self' https://spatial-gis.information.qld.gov.au https://api.met.no https://login.microsoftonline.com https://graph.microsoft.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="theme-color" content="#262261">
 <meta name="mobile-web-app-capable" content="yes">
 <title>STEL Field</title>
@@ -34,6 +34,7 @@
 <script src="calc.js"></script>
 <script src="rates.js"></script>
 <script src="logo.js"></script>
+<script src="sync.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

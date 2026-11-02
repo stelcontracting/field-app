@@ -4,7 +4,7 @@
    quietly in the background whenever there's internet (bump CACHE to ship one) and
    lands next open. Records live in IndexedDB, not here, so clearing caches never
    touches them. */
-var CACHE = "stel-field-v6";
+var CACHE = "stel-field-v7";
 var TILES = "stel-field-tiles-v1";
 var TILE_LIMIT = 1500;
 var FILES = [
@@ -14,6 +14,7 @@ var FILES = [
   "./calc.js",
   "./rates.js",
   "./logo.js",
+  "./sync.js",
   "./app.js",
   "./manifest.webmanifest",
   "./favicon.png",
